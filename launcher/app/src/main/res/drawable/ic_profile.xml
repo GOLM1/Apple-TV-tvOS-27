@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The profile button at the top right (top_menu), as on Apple TV: a round default avatar, a white head and
+     shoulders on grey, cut to the circle. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="44dp" android:height="44dp"
+    android:viewportWidth="44" android:viewportHeight="44">
+    <clip-path android:pathData="M22,0 A22,22 0 1,1 22,44 A22,22 0 1,1 22,0 Z" />
+    <path android:fillColor="#FF8E8E96"
+        android:pathData="M22,0 A22,22 0 1,1 22,44 A22,22 0 1,1 22,0 Z" />
+    <path android:fillColor="#FFF2F2F5"
+        android:pathData="M22,9 A8.5,8.5 0 1,1 22,26 A8.5,8.5 0 1,1 22,9 Z" />
+    <path android:fillColor="#FFF2F2F5"
+        android:pathData="M5,46 C5,35 12.5,29 22,29 C31.5,29 39,35 39,46 Z" />
+</vector>
