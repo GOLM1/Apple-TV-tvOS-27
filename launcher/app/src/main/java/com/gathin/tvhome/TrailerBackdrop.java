@@ -14,20 +14,35 @@ import org.json.JSONObject;
 final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
     private final View poster;
     /** finished: no preview after all (unavailable, failed); ended: it played to its end or its time limit. */
-    private final Runnable finished, ended;
+    private final Runnable finished, ended, active;
     private final Handler main = new Handler(Looper.getMainLooper());
     private TextureView view;
     private MediaPlayer player;
     /** YouTube's sound, a separate stream beside its video-only picture (pendingAudio), started with the picture. */
     private MediaPlayer audio;
-    private String pendingAudio;
+    private volatile String pendingAudio;
     private Surface surface;
-    private volatile int generation;
-    /** Counts slides shown, apart from the one prewarm was preparing (prewarmTarget). */
-    private volatile int showSerial;
-    private String prewarmTarget;
-    private boolean busy, rendering;
-    private String pendingUrl;
+    private final TrailerRequests requests = new TrailerRequests();
+    private boolean busy, rendering, buffering;
+    private final PreviewClock previewClock = new PreviewClock();
+    private int playbackLimit;
+    private int bufferedPercent;
+    private long playbackPosition, playbackProgressAt;
+    private boolean muted;
+    private float outputGain = 1f;
+    void setMuted(boolean muted) {
+        this.muted = muted;
+        float gain = muted ? 0f : outputGain;
+        try {
+            if (player != null) player.setVolume(gain, gain);
+            if (audio != null) audio.setVolume(gain, gain);
+        } catch (IllegalStateException ignored) { /* a player is being released */ }
+    }
+    private Runnable progressChanged = () -> {};
+    void onProgress(Runnable listener) { progressChanged = listener; }
+    float progress() { return rendering ? previewClock.fraction(android.os.SystemClock.uptimeMillis()) : -1f; }
+    boolean progressRunning() { return rendering && previewClock.running(); }
+    private volatile String pendingUrl;
     /** A small frame of the video for the glass (onSurfaceTextureUpdated), reused, and when it was last taken. */
     private android.graphics.Bitmap glassFrame;
     private long lastGlassFrame;
@@ -35,10 +50,12 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
     private static final long GLASS_FRAME_MS = 60;
     /** A slide waits this long before its trailer loads, so paging past it fetches nothing. */
     private static final long SHOW_DELAY_MS = 1800;
-    private final java.util.concurrent.ExecutorService worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private static final java.util.concurrent.ExecutorService worker = java.util.concurrent.Executors.newSingleThreadExecutor();
     private static final android.util.LruCache<String, String> URLS = new android.util.LruCache<>(32);
-    TrailerBackdrop(View poster, Runnable finished, Runnable ended) {
-        this.poster = poster; this.finished = finished; this.ended = ended;
+    TrailerBackdrop(View poster, Runnable finished, Runnable ended, Runnable active) {
+        this.poster = poster; this.finished = finished; this.ended = ended; this.active = active;
+        java.io.File directory = new java.io.File(poster.getContext().getCacheDir(), "trailer-previews");
+        worker.execute(() -> PreviewCache.cleanup(directory));
     }
     boolean busy() { return busy; }
     /** The trailer's picture now, at half size (it only fades out), or null when none is showing. */
@@ -52,8 +69,9 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
      */
     void prewarm(String page, String[] youtubeIds) {
         if (page == null && youtubeIds.length == 0) return;
-        prewarmTarget = page + "|" + String.join(",", youtubeIds);
-        int request = -showSerial - 1;   // stale only once another slide is shown (stale)
+        String next = page + "|" + String.join(",", youtubeIds);
+        if (requests.prewarming(next)) return;
+        int request = requests.prewarm(next);
         main.postDelayed(() -> worker.execute(() -> {
             if (!stale(request)) resolve(page, youtubeIds, request);
         }), SHOW_DELAY_MS + 200);
@@ -62,22 +80,26 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
     void show(String page, String[] youtubeIds) {
         // Showing the slide being prewarmed lets that work finish: this slide's own task, queued after it, then finds
         // it on the disk.
-        if (!(page + "|" + String.join(",", youtubeIds)).equals(prewarmTarget)) showSerial++;
-        prewarmTarget = null;
+        requests.show(page + "|" + String.join(",", youtubeIds));
         stop();
         android.util.Log.i("TrailerBackdrop", "Preview requested, public page=" + (page != null));
         if (page == null && youtubeIds.length == 0) return;
         busy = true;
-        int request = generation;
+        int request = requests.current();
+        loadingProgress(request);
+        active.run(); // Pause the poster's timer immediately, before the first frame is ready.
         main.postDelayed(() -> {
             if (stale(request)) return;
             worker.execute(() -> {
+                if (stale(request)) return;
+                loadingProgress(request);
                 String[] resolved = resolve(page, youtubeIds, request);
                 String ready = resolved[0], readyAudio = resolved[1];
                 main.post(() -> {
                     if (stale(request)) return;
                     android.util.Log.i("TrailerBackdrop", "Compatible stream=" + (ready != null));
                     if (ready == null) { stop(); finished.run(); return; }
+                    loadingProgress(request);
                     pendingUrl = ready;
                     pendingAudio = readyAudio;
                     android.util.Log.i("TrailerBackdrop", "Separate audio=" + (readyAudio != null));
@@ -88,24 +110,57 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
                 });
             });
         }, SHOW_DELAY_MS);
-        // Network/media preparation must not hold the shelf indefinitely.
-        main.postDelayed(() -> { if (!stale(request) && !rendering) { stop(); finished.run(); } }, 75000);
+        main.postDelayed(() -> checkLoading(request), 1000);
+    }
+
+    private void loadingProgress(int request) {
+        requests.progress(request, android.os.SystemClock.uptimeMillis());
+    }
+
+    /** Slow transfers keep their slide; only a full 30 seconds without progress is a timeout. */
+    private void checkLoading(int request) {
+        if (stale(request) || rendering) return;
+        if (requests.stalled(android.os.SystemClock.uptimeMillis())) {
+            android.util.Log.w("TrailerBackdrop", "Preview preparation stalled");
+            stop();
+            finished.run();
+        } else main.postDelayed(() -> checkLoading(request), 1000);
     }
     /**
      * The playable picture (and YouTube's separate sound) for a slide: {url, audio}, either null. Network and muxing,
      * so on the worker; what it fetches is cached (URLS, the resolver, localAudio), which is what prewarm relies on.
      */
     private String[] resolve(String page, String[] youtubeIds, int request) {
+        String[] result = null;
+        try {
+            result = resolveSource(page, youtubeIds, request);
+            return result;
+        } finally {
+            java.io.File picture = cacheFile(result == null ? null : result[0]);
+            java.io.File sound = cacheFile(result == null ? null : result[1]);
+            PreviewCache.touch(picture);
+            PreviewCache.touch(sound);
+            PreviewCache.trim(new java.io.File(poster.getContext().getCacheDir(), "trailer-previews"),
+                    PreviewCache.MAX_BYTES, picture, sound, cacheFile(pendingUrl), cacheFile(pendingAudio));
+        }
+    }
+
+    private static java.io.File cacheFile(String path) {
+        return path == null || path.startsWith("https://") ? null : new java.io.File(path);
+    }
+
+    private String[] resolveSource(String page, String[] youtubeIds, int request) {
+        loadingProgress(request);
         String url = page == null ? null : URLS.get(page);
         if (url != null && !new java.io.File(url).isFile()) url = null;
         try {
             if (url == null && page != null) {
-                String metrics = TrailerSource.previewMetrics(get(page));
+                String metrics = TrailerSource.previewMetrics(get(page, request));
                 android.util.Log.i("TrailerBackdrop", "Short preview metadata=" + (metrics != null));
                 if (metrics != null) {
                     String masterUrl = new JSONObject(metrics).optString("url");
                     if (masterUrl.startsWith("https://play-edge.itunes.apple.com/")) {
-                        String master = get(masterUrl);
+                        String master = get(masterUrl, request);
                         // The page identifies a short Extra; variant() accepts only public VideoPreview assets.
                         String videoUrl = TrailerSource.variant(master);
                         String audioUrl = TrailerSource.audioVariant(master);
@@ -135,8 +190,10 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
             for (String id : youtubeIds) {
                 if (stale(request)) break;
                 try {
+                    loadingProgress(request);
                     android.os.Bundle result = poster.getContext().getContentResolver().call(
                             android.net.Uri.parse("content://com.gathin.tvhome.trailerresolver"), "resolve", id, null);
+                    loadingProgress(request);
                     String stream = result == null || !"ready".equals(result.getString("status")) ? null : result.getString("url");
                     if (stream == null || !stream.startsWith("https://")) continue;
                     if (best == null || result.getInt("height") > best.getInt("height")) { best = result; bestId = id; }
@@ -181,12 +238,25 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
             current.setSurface(surface); current.setVolume(0f, 0f);
             current.setDataSource(pendingUrl);
             current.setOnPreparedListener(p -> { if (!stale(request)) p.start(); });
+            bufferedPercent = -1;
+            current.setOnBufferingUpdateListener((p, percent) -> {
+                if (!stale(request) && percent > bufferedPercent) {
+                    bufferedPercent = percent;
+                    loadingProgress(request);
+                }
+            });
             current.setOnVideoSizeChangedListener((p, w, h) -> crop(w, h));
             current.setOnInfoListener((p, what, extra) -> {
+                if (!stale(request) && (what == MediaPlayer.MEDIA_INFO_BUFFERING_START
+                        || what == MediaPlayer.MEDIA_INFO_BUFFERING_END)) {
+                    buffering = what == MediaPlayer.MEDIA_INFO_BUFFERING_START;
+                    if (rendering) samplePlayback(current, request, false);
+                }
                 if (what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START && !stale(request)) {
                     rendering = true;
                     view.animate().alpha(1f).setDuration(600).start();
-                    current.setVolume(1f, 1f);
+                    outputGain = 1f;
+                    current.setVolume(muted ? 0f : 1f, muted ? 0f : 1f);
                     startAudio(current, request);
                     android.util.Log.i("TrailerBackdrop", "Public trailer playing with audio");
                     int durationMs = 30000;
@@ -194,34 +264,66 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
                         int d = current.getDuration();
                         if (d > 0 && d < durationMs) durationMs = d;
                     } catch (Exception ignored) {}
-                    final int total = durationMs;
-                    int fadeStart = Math.max(0, total - 3000);
-                    int fadeDuration = total - fadeStart;
-                    int steps = Math.max(1, fadeDuration / 100);
-                    for (int i = 0; i <= steps; i++) {
-                        final float vol = Math.max(0f, 1f - (float) i / steps);
-                        int delay = fadeStart + i * 100;
-                        main.postDelayed(() -> {
-                            if (!stale(request) && player != null) {
-                                try { player.setVolume(vol, vol); } catch (Exception ignored) {}
-                                if (audio != null) try { audio.setVolume(vol, vol); } catch (Exception ignored) {}
-                            }
-                        }, delay);
-                    }
-                    main.postDelayed(() -> { if (!stale(request)) { stop(); ended.run(); } }, total);
+                    playbackLimit = durationMs;
+                    playbackPosition = -1;
+                    playbackProgressAt = android.os.SystemClock.uptimeMillis();
+                    buffering = false;
+                    samplePlayback(current, request, true);
+                    active.run();
                 }
                 return false;
             });
-            current.setOnCompletionListener(p -> { if (!stale(request)) { stop(); ended.run(); } });
+            current.setOnCompletionListener(p -> {
+                if (!stale(request)) {
+                    previewClock.finish();
+                    progressChanged.run();
+                    ended.run();
+                    if (!stale(request)) stop();
+                }
+            });
             current.setOnErrorListener((p, what, extra) -> {
                 android.util.Log.w("TrailerBackdrop", "Player error=" + what + "/" + extra);
                 if (!stale(request)) { stop(); finished.run(); }
                 return true;
             });
             current.prepareAsync();
-            main.postDelayed(() -> { if (!stale(request)) { stop(); finished.run(); } }, 180000);
         } catch (Exception e) { android.util.Log.w("TrailerBackdrop", "Player unavailable: " + e.getClass().getSimpleName()); stop(); finished.run(); }
     }
+    /** Real media time controls the fill, fade and limit; buffering cannot consume the remaining preview. */
+    private void samplePlayback(MediaPlayer current, int request, boolean repeat) {
+        if (stale(request) || current != player || !rendering) return;
+        try {
+            int position = current.getCurrentPosition();
+            long now = android.os.SystemClock.uptimeMillis();
+            if (position > playbackPosition) {
+                playbackPosition = position;
+                playbackProgressAt = now;
+            } else if (now - playbackProgressAt >= TrailerRequests.INACTIVITY_MS) {
+                android.util.Log.w("TrailerBackdrop", "Preview playback stalled");
+                stop();
+                finished.run();
+                return;
+            }
+            previewClock.sample(position, playbackLimit, android.os.SystemClock.uptimeMillis(),
+                    !buffering && current.isPlaying());
+            float volume = Math.max(0f, Math.min(1f, (playbackLimit - position) / 3000f));
+            outputGain = volume;
+            if (muted) volume = 0f;
+            current.setVolume(volume, volume);
+            if (audio != null) audio.setVolume(volume, volume);
+            progressChanged.run();
+            if (position >= playbackLimit) {
+                previewClock.finish();
+                ended.run();
+                if (!stale(request)) stop();
+                return;
+            }
+        } catch (IllegalStateException ignored) {
+            // A player being released cannot update the current slide.
+        }
+        if (repeat && !stale(request)) main.postDelayed(() -> samplePlayback(current, request, true), 100);
+    }
+
     /**
      * The separate sound track, joined at the picture's position once it is ready.
      * ponytail: two players kept in step only by that one seek; a sync loop if drift shows over the 30 s.
@@ -254,8 +356,14 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
         matrix.setScale(w * scale / view.getWidth(), h * scale / view.getHeight(), view.getWidth() / 2f, view.getHeight() / 2f);
         view.setTransform(matrix);
     }
+    /** Leaving Home or hiding the shelf must also invalidate work already running on the worker. */
+    void suspend() {
+        requests.cancelPrewarm();
+        stop();
+    }
     void stop() {
-        ++generation; busy = false; rendering = false; pendingUrl = null;
+        requests.stop(); busy = false; rendering = false; buffering = false; pendingUrl = null;
+        previewClock.reset();
         main.removeCallbacksAndMessages(null);
         if (view != null) { view.animate().cancel(); view.setAlpha(0f); view.setVisibility(View.GONE); }
         LiquidGlass.setVideoFrame(null);   // the glass goes back to the poster
@@ -264,7 +372,7 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
         pendingAudio = null;
         if (surface != null) { surface.release(); surface = null; }
     }
-    @Override public void onSurfaceTextureAvailable(SurfaceTexture texture, int w, int h) { play(generation); }
+    @Override public void onSurfaceTextureAvailable(SurfaceTexture texture, int w, int h) { play(requests.current()); }
     @Override public void onSurfaceTextureSizeChanged(SurfaceTexture texture, int w, int h) {
         if (player != null) crop(player.getVideoWidth(), player.getVideoHeight());
     }
@@ -280,7 +388,7 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
         lastGlassFrame = now;
         if (glassFrame == null) glassFrame = android.graphics.Bitmap.createBitmap(128, 72, android.graphics.Bitmap.Config.ARGB_8888);
         view.getBitmap(glassFrame);
-        LiquidGlass.setVideoFrame(glassFrame);
+        LiquidGlass.setVideoFrame(glassFrame, view.getAlpha());
     }
     /** Native Android 11 HLS rejects CMAF. Repackage a short clear preview, without decoding it. */
     private String compatiblePreview(String videoUrl, String audioUrl, int request) throws Exception {
@@ -292,7 +400,7 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
         for (byte b : digest) name.append(String.format(java.util.Locale.ROOT, "%02x", b & 255));
         java.io.File output = new java.io.File(directory, name + "-audio.mp4");
         if (output.isFile() && output.length() > 1024) return output.getAbsolutePath();
-        String playlist = get(videoUrl);
+        String playlist = get(videoUrl, request);
         if (!playlist.contains("#EXT-X-MAP:")) return videoUrl;
         if (playlist.contains("#EXT-X-KEY:")) throw new java.io.IOException("Not a clear preview");
         java.util.regex.Matcher init = java.util.regex.Pattern.compile("#EXT-X-MAP:URI=\"([^\"]+)\"").matcher(playlist);
@@ -316,7 +424,7 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
             }
             if (audioUrl != null && rawAudio != null) {
                 try {
-                    String audioPlaylist = get(audioUrl);
+                    String audioPlaylist = get(audioUrl, request);
                     if (!audioPlaylist.contains("#EXT-X-KEY:")) {
                         java.util.regex.Matcher aInit = java.util.regex.Pattern.compile("#EXT-X-MAP:URI=\"([^\"]+)\"").matcher(audioPlaylist);
                         if (aInit.find()) {
@@ -413,11 +521,6 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
                 if (muxer != null) muxer.release();
             }
             if (stale(request) || !temporary.renameTo(output)) throw new java.io.IOException("Preview changed");
-            java.io.File[] files = directory.listFiles(f -> f.getName().endsWith(".mp4"));
-            if (files != null && files.length > 3) {
-                java.util.Arrays.sort(files, java.util.Comparator.comparingLong(java.io.File::lastModified));
-                for (int i = 0; i < files.length - 3; i++) if (!files[i].equals(output)) files[i].delete();
-            }
             android.util.Log.i("TrailerBackdrop", "Compatible 30-second preview ready");
             return output.getAbsolutePath();
         } finally {
@@ -435,6 +538,7 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
         java.io.File file = new java.io.File(directory, "yt-" + id.replaceAll("[^A-Za-z0-9_-]", "") + "-flat.m4a");
         if (file.isFile() && file.length() > 0) return file.getAbsolutePath();
         java.io.File part = new java.io.File(directory, file.getName() + ".part");
+        java.io.File flat = new java.io.File(directory, file.getName() + ".mux");
         try {
             directory.mkdirs();
             // range= in the query is how YouTube serves a file in one go instead of throttling it.
@@ -442,7 +546,6 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
                 copyFragment(url + "&range=0-11999999", out, request);
             }
             // YouTube's file is fragmented, which the TV's own MP4 reader plays as empty: copy it into a plain one.
-            java.io.File flat = new java.io.File(directory, file.getName() + ".mux");
             android.media.MediaExtractor extractor = new android.media.MediaExtractor();
             android.media.MediaMuxer muxer = null;
             try {
@@ -461,7 +564,7 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
                 java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(256 * 1024);
                 android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
                 // The picture stops at 30 s (play), so 35 s of sound is enough.
-                while (extractor.getSampleTime() >= 0 && extractor.getSampleTime() < 35_000_000L) {
+                while (!stale(request) && extractor.getSampleTime() >= 0 && extractor.getSampleTime() < 35_000_000L) {
                     info.size = extractor.readSampleData(buffer, 0);
                     if (info.size < 0) break;
                     info.offset = 0;
@@ -476,11 +579,14 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
                 if (muxer != null) muxer.release();
                 part.delete();
             }
+            if (stale(request)) { flat.delete(); return null; }
             return flat.renameTo(file) ? file.getAbsolutePath() : null;
         } catch (Exception e) {
             android.util.Log.w("TrailerBackdrop", "Audio preparation failed: " + e.getClass().getSimpleName());
-            part.delete();
             return null;
+        } finally {
+            part.delete();
+            flat.delete();
         }
     }
     /**
@@ -510,11 +616,11 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
             muxer = new android.media.MediaMuxer(mux.getAbsolutePath(), android.media.MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
             int vOut = muxer.addTrack(video.getTrackFormat(v)), aOut = muxer.addTrack(sound.getTrackFormat(a));
             muxer.start();
-            copySamples(video, muxer, vOut, true);
-            copySamples(sound, muxer, aOut, false);
+            copySamples(video, muxer, vOut, true, request);
+            copySamples(sound, muxer, aOut, false, request);
             muxer.stop();
+            if (stale(request)) { mux.delete(); return null; }
             if (!mux.renameTo(file)) return null;
-            prune(directory);
             return file.getAbsolutePath();
         } catch (Exception e) {
             android.util.Log.w("TrailerBackdrop", "Joining YouTube preview failed: " + e.getClass().getSimpleName() + " " + e.getMessage());
@@ -525,25 +631,15 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
             sound.release();
             if (muxer != null) try { muxer.release(); } catch (RuntimeException ignored) {}
             part.delete();
-        }
-    }
-    /** Up to 20 MB a trailer: keep the folder under 400 MB, oldest first out. */
-    private static void prune(java.io.File directory) {
-        java.io.File[] files = directory.listFiles();
-        if (files == null) return;
-        java.util.Arrays.sort(files, (x, y) -> Long.compare(y.lastModified(), x.lastModified()));
-        long total = 0;
-        for (java.io.File f : files) {
-            total += f.length();
-            if (total > 400L * 1024 * 1024) f.delete();
+            mux.delete();
         }
     }
     /**
-     * Whether work for {@code request} is out of date: a slide's own work (its generation, 0 and up) once the slide
-     * stops; a prewarm (-showSerial - 1) once a slide other than the one it prepares is shown.
+     * Playback stops with its generation; a prewarm survives showing its target, but not leaving Home.
+     * TrailerRequests also invalidates prewarms when a different slide is shown.
      */
     private boolean stale(int request) {
-        return request >= 0 ? request != generation : -request - 1 != showSerial;
+        return requests.stale(request);
     }
     private static String safeId(String id) {
         return id.replaceAll("[^A-Za-z0-9_-]", "");
@@ -556,10 +652,10 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
         return -1;
     }
     /** Samples of the selected track up to 30 s, or until a download cut short ends them. */
-    private static void copySamples(android.media.MediaExtractor in, android.media.MediaMuxer muxer, int track, boolean video) {
+    private void copySamples(android.media.MediaExtractor in, android.media.MediaMuxer muxer, int track, boolean video, int request) {
         java.nio.ByteBuffer buffer = java.nio.ByteBuffer.allocate(1024 * 1024);
         android.media.MediaCodec.BufferInfo info = new android.media.MediaCodec.BufferInfo();
-        while (in.getSampleTime() >= 0 && in.getSampleTime() < 30_000_000L) {
+        while (!stale(request) && in.getSampleTime() >= 0 && in.getSampleTime() < 30_000_000L) {
             int size;
             try { size = in.readSampleData(buffer, 0); } catch (RuntimeException cutShort) { break; }
             if (size < 0) break;
@@ -578,17 +674,20 @@ final class TrailerBackdrop implements TextureView.SurfaceTextureListener {
                 if (stale(request)) throw new java.io.IOException("Preview changed");
                 if (out.getChannel().position() + n > 24 * 1024 * 1024) throw new java.io.IOException("Preview too large");
                 out.write(bytes, 0, n);
+                loadingProgress(request);
             }
         } finally { c.disconnect(); }
     }
-    private static String get(String url) throws Exception {
+    private String get(String url, int request) throws Exception {
         java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(url).openConnection();
         c.setConnectTimeout(5000); c.setReadTimeout(5000);
         try (java.io.InputStream in = c.getInputStream(); java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream()) {
             byte[] bytes = new byte[8192]; int n;
             while ((n = in.read(bytes)) != -1) {
+                if (stale(request)) throw new java.io.IOException("Preview changed");
                 if (out.size() + n > 2 * 1024 * 1024) throw new java.io.IOException("Preview page too large");
                 out.write(bytes, 0, n);
+                loadingProgress(request);
             }
             return out.toString(java.nio.charset.StandardCharsets.UTF_8.name());
         } finally { c.disconnect(); }

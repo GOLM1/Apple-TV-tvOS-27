@@ -20,9 +20,10 @@ import android.view.animation.DecelerateInterpolator;
 final class TileSheen extends Drawable {
     /** Where the band rests, as a fraction of the width, and how bright it is moving and at rest (alpha 0-255). */
     static final float REST = 0.3f;
-    private static final int MOVING_ALPHA = 0x3D, REST_ALPHA = 0x16;
+    private static final int MOVING_ALPHA = 0x26, REST_ALPHA = 0x12;
 
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint rim = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF rect = new RectF();
     private final float radius;
     private float position = REST;
@@ -34,6 +35,8 @@ final class TileSheen extends Drawable {
 
     TileSheen(float radiusPx) {
         radius = radiusPx;
+        rim.setStyle(Paint.Style.STROKE);
+        rim.setStrokeWidth(1f);
     }
 
     /** Sweep the band from {@code from} (below 0 starts off the left edge, near 1 at the right) to its rest. */
@@ -46,7 +49,7 @@ final class TileSheen extends Drawable {
             return;
         }
         sweep = ValueAnimator.ofFloat(0f, 1f);
-        sweep.setDuration(560);
+        sweep.setDuration(300);
         sweep.setInterpolator(new DecelerateInterpolator(1.6f));
         sweep.addUpdateListener(a -> {
             float t = (float) a.getAnimatedValue();
@@ -55,6 +58,10 @@ final class TileSheen extends Drawable {
             invalidateSelf();
         });
         sweep.start();
+    }
+
+    void stop() {
+        if (sweep != null) sweep.cancel();
     }
 
     @Override public void draw(Canvas canvas) {
@@ -67,6 +74,9 @@ final class TileSheen extends Drawable {
             gradient = new LinearGradient(-w * 0.55f, b.top - h * 0.2f, w * 0.25f, b.top + h * 0.9f,
                     new int[]{0x00FFFFFF, 0xFFFFFFFF, 0x00FFFFFF}, new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP);
             paint.setShader(gradient);
+            rim.setShader(new LinearGradient(b.left, b.top, b.right, b.bottom,
+                    new int[]{0x60FFFFFF, 0x12FFFFFF, 0x08FFFFFF, 0x28FFFFFF},
+                    new float[]{0f, 0.35f, 0.7f, 1f}, Shader.TileMode.CLAMP));
             shaderWidth = b.width();
             shaderHeight = b.height();
         }
@@ -75,6 +85,8 @@ final class TileSheen extends Drawable {
         paint.setAlpha(Math.round(brightness));
         rect.set(b);
         canvas.drawRoundRect(rect, radius, radius, paint);
+        rect.inset(0.5f, 0.5f);
+        canvas.drawRoundRect(rect, Math.max(0f, radius - 0.5f), Math.max(0f, radius - 0.5f), rim);
     }
 
     @Override public void setAlpha(int alpha) {}

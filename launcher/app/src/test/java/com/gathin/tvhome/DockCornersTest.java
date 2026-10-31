@@ -11,6 +11,20 @@ public class DockCornersTest {
     /** activity_main.xml: 56dp root padding and 10dp grid padding on each side of a 1920 px screen. */
     private static final int INNER = 1920 - 2 * 56 * 2 - 2 * 10 * 2;
 
+    @Test public void focusedTileKeepsEqualVisibleGapOnEverySide() {
+        float gap = 20f;
+        for (int columns = 4; columns <= 7; columns++) {
+            int width = AppAdapter.tileWidthPx(INNER, columns, DENSITY);
+            int height = AppAdapter.tileHeightPx(width);
+            for (float scale : new float[]{1f, 1.06f, 1.08f}) {
+                float horizontal = DockDecoration.focusPaddingPx(width, scale, gap);
+                float vertical = DockDecoration.focusPaddingPx(height, scale, gap);
+                assertEquals(gap, horizontal - width * (scale - 1f) / 2f, 0.001f);
+                assertEquals(gap, vertical - height * (scale - 1f) / 2f, 0.001f);
+            }
+        }
+    }
+
     @Test public void bandRadiusIsTileRadiusPlusPadding() {
         assertEquals(77f, DockDecoration.radiusPx(25f, 52f), 0f);
     }

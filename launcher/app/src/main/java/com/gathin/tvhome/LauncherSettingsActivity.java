@@ -47,7 +47,11 @@ public final class LauncherSettingsActivity extends Activity {
     protected void onCreate(Bundle state) {
         super.onCreate(state);
         setContentView(R.layout.activity_launcher_settings);
-        choices = getSharedPreferences(Config.SETTINGS_NAME, MODE_PRIVATE);
+        choices = Profiles.preferences(this);
+        findViewById(R.id.profilesChoice).setOnClickListener(v -> {
+            startActivity(new Intent(this, ProfilesActivity.class).putExtra("manage", true));
+            finish(); // Returning Home rebuilds the settings and avatar for the selected profile.
+        });
         Config config = Config.load(this);
         View reorderChoice = findViewById(R.id.reorderChoice);
         reorderChoice.setVisibility(config.launcherSettingsButton ? View.VISIBLE : View.GONE);

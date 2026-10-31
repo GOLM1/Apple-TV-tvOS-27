@@ -606,7 +606,7 @@ final class Config {
         for (String pkg : topBarApps) if (!hidden.contains(pkg)) hidden.add(pkg);
         // A theme push or reset invalidates choices made on the TV. On first use, remember the
         // current theme without clearing choices from an older launcher version.
-        SharedPreferences choices = ctx.getSharedPreferences(SETTINGS_NAME, Context.MODE_PRIVATE);
+        SharedPreferences choices = Profiles.preferences(ctx);
         // Unmounted storage looks like a theme reset; compare only once the file is readable.
         if (mounted) syncThemeChoices(choices, dir, file);
         int chosenColumns = choices.getInt("columns", columns);

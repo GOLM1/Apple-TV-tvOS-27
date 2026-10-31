@@ -23,6 +23,7 @@ import android.widget.Toast;
  * closes the panel.
  */
 public final class QuickSettingsActivity extends Activity {
+    private boolean homeHeaderHidden;
     @Override
     protected void attachBaseContext(android.content.Context base) {
         super.attachBaseContext(LauncherLocale.wrap(base));   // locale
@@ -63,6 +64,8 @@ public final class QuickSettingsActivity extends Activity {
         actions.add(new ControlCenter.Action(R.drawable.ic_power, getString(R.string.cc_sleep), () -> {
             if (!HomeKeyService.sleep()) launch(SystemSettings.intent(this, Settings.ACTION_SETTINGS));
         }));
+        actions.add(new ControlCenter.Action(R.drawable.ic_audio, getString(R.string.cc_audio),
+                () -> launch(SystemSettings.intent(this, Settings.ACTION_SOUND_SETTINGS))));
         actions.add(new ControlCenter.Action(R.drawable.ic_picture, getString(R.string.cc_display),
                 () -> launch(SystemSettings.intent(this, Settings.ACTION_DISPLAY_SETTINGS))));
         actions.add(new ControlCenter.Action(R.drawable.ic_apps, getString(R.string.cc_apps),
@@ -79,12 +82,20 @@ public final class QuickSettingsActivity extends Activity {
         scrim.removeAllViews();
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(ControlCenter.widthPx(density),
                 ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END);
-        lp.topMargin = Math.round(80 * density);
+        lp.topMargin = Math.round(36 * density);
         lp.setMarginEnd(Math.round(56 * density));
         scrim.addView(panel, lp);
+        homeHeaderHidden = getIntent().getBooleanExtra(ControlCenter.HOME_BACKDROP, false);
+        if (homeHeaderHidden) ControlCenter.setExpanded(true);
         ControlCenter.focusFirst(panel);
         Config config = Config.load(this);
         panel.post(() -> Motion.reveal(panel, config.animations, config.reducedMotion));
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (homeHeaderHidden) ControlCenter.setExpanded(false);
+        super.onDestroy();
     }
 
     private void launch(Intent intent) {

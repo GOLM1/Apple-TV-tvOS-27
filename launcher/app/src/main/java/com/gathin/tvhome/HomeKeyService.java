@@ -83,6 +83,8 @@ public class HomeKeyService extends AccessibilityService {
     private GamepadPassthrough gamepads;
     /** Screen-off receiver while guard_off_in_standby is set; null otherwise. */
     private BroadcastReceiver standbyExit;
+    /** usb_host_at_boot's shutdown receiver (UsbHostAtBoot); null when that is off. */
+    private BroadcastReceiver usbHostShutdown;
     /** disableSelf is how this service leaves for standby, not the user turning it off. */
     private boolean steppingOut;
     /** The bound helper, so the opt-in broadcast can arm it without waiting for a new connection. */
@@ -92,6 +94,9 @@ public class HomeKeyService extends AccessibilityService {
     protected void onServiceConnected() {
         super.onServiceConnected();
         running = this;
+        if (usbHostShutdown == null && getResources().getBoolean(R.bool.usb_host_at_boot)) {
+            usbHostShutdown = UsbHostAtBoot.start(this);
+        }
         settingsScancodes = getResources().getIntArray(R.array.settings_key_scancodes);
         // The service is directBootAware: Android 11 skips a service that is not while the user is still
         // locked at boot, writes accessibility_enabled=0 and, on TCL G03 firmware, never binds it after the
@@ -145,6 +150,7 @@ public class HomeKeyService extends AccessibilityService {
         if (running == this) running = null;
         stopWaitingForUnlock();
         if (screenOnReceiver != null) unregisterReceiver(screenOnReceiver);
+        if (usbHostShutdown != null) unregisterReceiver(usbHostShutdown);
         if (standbyExit != null) {
             try {
                 unregisterReceiver(standbyExit);
@@ -211,7 +217,7 @@ public class HomeKeyService extends AccessibilityService {
         // power_on_home, off by default. Not with boot_to_live_tv, or with Live TV picked as the Open on start app:
         // those open Live TV on purpose at boot.
         String openOnStart = config.openOnStartChoice
-                ? getSharedPreferences(Config.SETTINGS_NAME, MODE_PRIVATE).getString(OpenOnStart.KEY, "") : "";
+                ? Profiles.preferences(this).getString(OpenOnStart.KEY, "") : "";
         powerOnLiveTv = config.powerOnHome && !config.bootToLiveTv && !config.liveTvPackage.equals(openOnStart)
                 ? config.liveTvPackage : "";
         powerOnAlways = config.powerOnHomeAlways && !config.bootToLiveTv && openOnStart.isEmpty();
@@ -260,7 +266,9 @@ public class HomeKeyService extends AccessibilityService {
         // The stock launcher handled the remote's Settings button; with it disabled the button does nothing.
         if (isSettingsKey(event)) {
             if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) {
+                if (settingsPanel && MainActivity.toggleControlCenterFromRemote()) return true;
                 Intent open = settingsPanel ? new Intent(this, QuickSettingsActivity.class)
+                        .putExtra(ControlCenter.HOME_BACKDROP, MainActivity.homeVisible)
                         : SystemSettings.intent(this, Settings.ACTION_SETTINGS);
                 try {
                     startActivity(open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));

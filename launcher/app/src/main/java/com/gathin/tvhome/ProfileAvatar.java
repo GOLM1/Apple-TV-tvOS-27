@@ -9,26 +9,35 @@ import android.graphics.Shader;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.ShapeDrawable;
 import android.graphics.drawable.shapes.OvalShape;
-import java.io.File;
 
-/** A personal photo stored beside the theme, never bundled into the APK. */
+/** The active profile's small, offline portrait; never restores legacy personal photos. */
 final class ProfileAvatar {
     static Drawable load(Context ctx, int size) {
-        File directory = Config.dir(ctx);
-        File photo = directory == null ? null : new File(directory, "profile.png");
+        try { return load(ctx, Profiles.active(ctx), size); }
+        catch (RuntimeException invalid) { return ctx.getDrawable(R.drawable.ic_profile); }
+    }
+    static Drawable load(Context ctx, ProfileList.Profile profile, int size) {
+        if (profile.avatar.isEmpty()) return ctx.getDrawable(R.drawable.ic_profile);
+        java.io.File file = Profiles.avatarFile(ctx, profile.id, profile.avatar);
+        if (!file.isFile() || file.length() > 128 * 1024) return ctx.getDrawable(R.drawable.ic_profile);
         Bitmap bitmap = null;
-        if (photo != null && photo.isFile()) {
+        if (size > 0) {
             BitmapFactory.Options bounds = new BitmapFactory.Options();
             bounds.inJustDecodeBounds = true;
-            BitmapFactory.decodeFile(photo.getAbsolutePath(), bounds);
+            BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
             BitmapFactory.Options options = new BitmapFactory.Options();
             options.inSampleSize = 1;
             while (bounds.outWidth / (options.inSampleSize * 2) >= size
                     && bounds.outHeight / (options.inSampleSize * 2) >= size) options.inSampleSize *= 2;
-            bitmap = BitmapFactory.decodeFile(photo.getAbsolutePath(), options);
+            bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
         }
+        return round(ctx, bitmap, size);
+    }
+    static Drawable round(Context ctx, Bitmap bitmap, int size) {
         if (bitmap == null) return ctx.getDrawable(R.drawable.ic_profile);
         ShapeDrawable avatar = new ShapeDrawable(new OvalShape());
+        avatar.setIntrinsicWidth(size);
+        avatar.setIntrinsicHeight(size);
         BitmapShader shader = new BitmapShader(bitmap, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
         float scale = Math.max((float) size / bitmap.getWidth(), (float) size / bitmap.getHeight());
         Matrix transform = new Matrix();

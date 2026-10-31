@@ -9,6 +9,12 @@
 
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Explicit Control Center radio toggle on Android 11 only; newer releases use system settings. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.NETWORK_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <!-- Needed since Android 10 to read the Wi-Fi network name for the network pill. Never requested at
          runtime: build-and-install grants it with pm grant, so lint's Android 12 "ask for COARSE with
          FINE" rule does not apply here. -->
@@ -27,11 +33,15 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Same-signature IPC to the optional, separate trailer extractor; no system privileges. -->
     <uses-permission android:name="com.gathin.tvhome.trailerresolver.RESOLVE" />
+    <!-- Local media bridge to the optional, same-signed AirPlay receiver. -->
+    <uses-permission android:name="io.github.besliky.airplaytv.LAUNCHER_MEDIA" />
 
     <!-- Android 11+ package visibility: lets the launcher list the TV apps it shows as tiles, and the
          apps that declare a module card (docs/specs/card.md). -->
     <queries>
         <provider android:authorities="com.gathin.tvhome.trailerresolver" />
+        <provider android:authorities="io.github.besliky.airplaytv.launcher" />
+        <intent><action android:name="android.settings.panel.action.WIFI" /></intent>
         <intent><action android:name="android.settings.BLUETOOTH_SETTINGS" /></intent>
         <intent><action android:name="com.android.tv.settings.ACCESSORIES_CONNECTED_DEVICES" /></intent>
         <!-- The standard settings handlers, so package visibility doesn't hide them and send the pills to a vendor fallback by mistake. -->
@@ -108,6 +118,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".ProfilesActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:screenOrientation="landscape" />
         <activity
             android:name=".LauncherSettingsActivity"
             android:exported="false"

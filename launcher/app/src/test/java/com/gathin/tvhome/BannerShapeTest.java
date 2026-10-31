@@ -1,6 +1,7 @@
 package com.gathin.tvhome;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -23,5 +24,18 @@ public class BannerShapeTest {
     public void drawablesWithoutAnIntrinsicSizeStillFillTheTile() {
         assertTrue(AppAdapter.isBannerShaped(-1, -1));
         assertTrue(AppAdapter.isBannerShaped(0, 0));
+    }
+
+    @Test public void tileArtworkRetainsAvailableDetailWithABoundedDensity() {
+        assertEquals(480, AppAdapter.artworkDensity(320, 480));
+        assertEquals(480, AppAdapter.artworkDensity(320, 640));
+        assertEquals(640, AppAdapter.artworkDensity(640, 640));
+    }
+
+    @Test public void missingDetailDoesNotCauseExtraRasterEnlargement() {
+        assertEquals(320, AppAdapter.artworkDensity(320, 160));
+        assertEquals(320, AppAdapter.artworkDensity(320, 320));
+        assertEquals(320, AppAdapter.artworkDensity(320, 0));
+        assertEquals(320, AppAdapter.artworkDensity(320, 65535));
     }
 }

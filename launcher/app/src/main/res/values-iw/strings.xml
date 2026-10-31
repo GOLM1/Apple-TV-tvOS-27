@@ -145,4 +145,16 @@
     <string name="race_countdown_hours">%1$d שע׳ %2$d דק׳</string>
     <string name="race_countdown_days">%1$d ימ׳ %2$d שע׳</string>
     <string name="last_opened">פתיחה אחרונה: %1$s</string>
+    <string name="resume">המשך צפייה</string>
+    <string name="play">הפעלה</string>
+    <string name="time_left">נותרו %1$s</string>
+    <string name="cc_title">מרכז הבקרה</string>
+    <string name="cc_sleep">שינה</string>
+    <string name="cc_display">תצוגה</string>
+    <string name="cc_apps">אפליקציות</string>
+    <string name="cc_wifi">Wi-Fi</string>
+    <string name="cc_bluetooth">Bluetooth</string>
+    <string name="cc_info">מידע</string>
+    <string name="cc_next">הבא</string>
+    <string name="airplay_card_hint">OK opens music. Right selects the profile menu.</string>
 </resources>

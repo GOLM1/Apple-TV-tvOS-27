@@ -125,6 +125,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private String liveTvPkg;
     /** Launcher settings' change count this Home was built with (see onResume). */
     private long settingsRevision;
+    private String activeProfileId;
     /** Idle time on Home before ClockActivity; 0 is off (config.xml, home_idle_clock_minutes). */
     private long idleClockMs;
     private final Runnable showIdleClock = () -> startActivity(new Intent(this, ClockActivity.class));
@@ -145,6 +146,36 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private AppAdapter adapter;
     private RecyclerView grid;
     private FrameLayout root;
+    private View browsingHeader;
+    private boolean headerHiddenByScroll;
+
+    /** Let app rows travel to the actual screen edge instead of clipping below the collapsed header. */
+    private void expandBrowsingViewport() {
+        ViewGroup wrapper = (ViewGroup) grid.getParent();
+        ViewGroup shell = (ViewGroup) wrapper.getParent();
+        browsingHeader = (View) findViewById(R.id.topButtons).getParent();
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+        lp.leftMargin = shell.getPaddingLeft();
+        lp.rightMargin = shell.getPaddingRight();
+        shell.removeView(wrapper);
+        root.addView(wrapper, root.indexOfChild(shell), lp);
+    }
+
+    private void setHeaderHiddenByScroll(boolean hidden) {
+        if (browsingHeader == null || headerHiddenByScroll == hidden) return;
+        headerHiddenByScroll = hidden;
+        browsingHeader.animate().cancel();
+        if (hidden) {
+            browsingHeader.setVisibility(View.INVISIBLE);
+        } else {
+            browsingHeader.setVisibility(View.VISIBLE);
+            if (animations && !reducedMotion) {
+                browsingHeader.setAlpha(0f);
+                browsingHeader.animate().alpha(1f).setDuration(200).start();
+            } else browsingHeader.setAlpha(1f);
+        }
+    }
     private WallpaperPlayer wallpaperPlayer;
     private GlassView glass;
     private View ambient;
@@ -188,6 +219,30 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private boolean heroShown;
     private boolean animations;
     private boolean advancedEffects;
+    private Runnable pendingShelf;
+
+    private void cancelPendingShelf() {
+        if (pendingShelf != null) handler.removeCallbacks(pendingShelf);
+        pendingShelf = null;
+    }
+
+    private void flushPendingShelf() {
+        Runnable pending = pendingShelf;
+        cancelPendingShelf();
+        if (pending != null) pending.run();
+    }
+
+    private void settleShelf(int position, View card) {
+        cancelPendingShelf();
+        pendingShelf = () -> {
+            pendingShelf = null;
+            if (card.isFocused() && homeVisible && !homeTrending && position == lastFocused) {
+                continueWatching.showApp(adapter.packageAt(position), adapter.artworkAt(position));
+            }
+        };
+        handler.postDelayed(pendingShelf, 160);
+    }
+
     private TextView greeting;
     private View clockBlock;
     private View btnInputs;
@@ -277,6 +332,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     /** Between onStart and onStop: Home is (at least partly) on screen. */
     private boolean started;
     static boolean homeVisible;
+    private static java.lang.ref.WeakReference<MainActivity> resumedHome = new java.lang.ref.WeakReference<>(null);
+    private PopupWindow controlCenterPopup;
+
+    /** Keep the home preview playing: open a popup in its resumed Activity instead of pausing it for an overlay. */
+    static boolean toggleControlCenterFromRemote() {
+        MainActivity home = resumedHome.get();
+        if (home == null || !home.topMenu || home.isFinishing() || home.isDestroyed()
+                || !home.hasWindowFocus() && home.controlCenterPopup == null) return false;
+        home.root.post(home::showTopMenu);
+        return true;
+    }
     /** Rebuild the tiles on the way back to Home only when apps changed meanwhile (TileRefresh). */
     private final TileRefresh tileRefresh = new TileRefresh();
     /** PackageManager's change counter at the last rebuild, to catch a package broadcast that never arrived. */
@@ -399,6 +465,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        homeTrendingPending = getIntent() != null && getIntent().hasCategory(Intent.CATEGORY_HOME);
+        homeTrending = homeTrendingPending;
         setContentView(R.layout.activity_main);
         density = getResources().getDisplayMetrics().density;
         // config.xml, overlaid by config.json from a pushed theme (see Config and tools/theme.sh).
@@ -408,6 +476,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // restore_key_services: after a force stop, put back the remote's accessibility helpers that Android took
         // off the list (needs WRITE_SECURE_SETTINGS, granted by build-and-install with RESTORE_KEY_SERVICES=1).
         if (cfg.restoreKeyServices) ServiceRepair.restore(this);
+        activeProfileId = Profiles.activeId(this);
         settingsRevision = settingsRevision();
         applyViewInputsHandler(cfg.handleViewInputs);
         settingsKeycodes = cfg.settingsKeycodes;
@@ -628,6 +697,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         Order savedOrder = Order.load(Order.file(this));
         adapter.setSavedOrder(Order.ranks(savedOrder, dockApps), Order.docked(savedOrder, dockApps));
         grid.setAdapter(adapter);
+        if (cfg.topMenu && dockRow && !singleRow) expandBrowsingViewport();
 
         // tvOS layout: push the dock row towards the bottom of the screen, leaving room for
         // rows_below_dock grid rows under it; the rest of the grid stays below until you press Down.
@@ -702,7 +772,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         grid.addOnScrollListener(new RecyclerView.OnScrollListener() {
             @Override
             public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
-                continueWatching.setHiddenByScroll(rv.computeVerticalScrollOffset() > 8 * density);
+                boolean browsing = rv.computeVerticalScrollOffset() > 8 * density;
+                continueWatching.setHiddenByScroll(browsing);
+                setHeaderHiddenByScroll(browsing);
             }
         });
 
@@ -792,7 +864,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             btnWifi.setVisibility(View.GONE);
             // The profile pill of Apple TV's top right instead of a gear: the time, then the avatar, in the glass pill.
             // A TextClock in the button's place (same id) keeps the time without a timer; it opens the same menu.
-            TextClock profile = new TextClock(this, null, 0, R.style.TopButton);
+            AirPlayMusic.Pill profile = new AirPlayMusic.Pill(this, cfg.animations && !cfg.reducedMotion);
             profile.setId(R.id.btnSettings);
             profile.setFocusable(true);
             profile.setFormat12Hour("h:mm");
@@ -822,7 +894,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             bar.removeView(btnSettings);
             bar.addView(profile, at, settingsLp);
             btnSettings = profile;
-            btnSettings.setOnClickListener(v -> showTopMenu());
+            ControlCenter.registerHomePill(profile);
+            airPlayMusic = new AirPlayMusic(this, profile, continueWatching::muteTrailers);
+            btnSettings.setOnClickListener(v -> {
+                if (!airPlayMusic.openPlayer()) showTopMenu();
+            });
             // The lone gear sits at the header's middle, not on its bottom line like the row of pills.
             LinearLayout topButtons = findViewById(R.id.topButtons);
             RelativeLayout.LayoutParams tlp = (RelativeLayout.LayoutParams) topButtons.getLayoutParams();
@@ -863,7 +939,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         btnInputs.setOnKeyListener(pillKeys);
         btnWifi.setOnKeyListener(pillKeys);
         btnVpn.setOnKeyListener(pillKeys);
-        btnSettings.setOnKeyListener(pillKeys);
+        btnSettings.setOnKeyListener((v, key, event) -> {
+            if (v instanceof AirPlayMusic.Pill && ((AirPlayMusic.Pill) v).handleKey(key, event)) return true;
+            return pillKeys.onKey(v, key, event);
+        });
         btnReorder.setOnKeyListener(pillKeys);
         btnLibraryTop.setOnKeyListener(pillKeys);
         for (View button : topAppButtons) button.setOnKeyListener(pillKeys);
@@ -1008,11 +1087,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
         updateClockVisibility();
         tileRefresh.onStart();
+        if (airPlayMusic != null) airPlayMusic.start();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        resumedHome = new java.lang.ref.WeakReference<>(this);
         // A festival that started or ended while Home was in the background: rebuild with or without it.
         if (festive != festival.active(LocalDate.now())) {
             recreate();
@@ -1021,7 +1102,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // Something changed in Launcher settings: rebuild with it, however the settings were left. Only Back
         // delivered their RESULT_OK; Home (the remote's button) clears them off this task and the result comes
         // back cancelled, so a new wallpaper or layout waited for the next process start.
-        if (Config.settingsChanged(settingsRevision, settingsRevision())) {
+        if (!activeProfileId.equals(Profiles.activeId(this)) || Config.settingsChanged(settingsRevision, settingsRevision())) {
             recreate();
             return;
         }
@@ -1072,7 +1153,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     /** Launcher settings' change count (Config.SETTINGS_REVISION_KEY); onResume rebuilds Home when it moved. */
     private long settingsRevision() {
-        return getSharedPreferences(Config.SETTINGS_NAME, MODE_PRIVATE).getLong(Config.SETTINGS_REVISION_KEY, 0);
+        return Profiles.preferences(this).getLong(Config.SETTINGS_REVISION_KEY, 0);
     }
 
     /**
@@ -1199,10 +1280,17 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private void restoreFocus() {
         if (homeTrendingPending) {
             homeTrendingPending = false;
-            showHomeTrending();
-            tilesReady = true;
-            startPendingSettingsReorder();
-            showCardPrompt();
+            homeTrending = true;
+            grid.post(() -> {
+                // Initialise the dock's padding/scroll anchor before focusing the shelf on a cold Home launch.
+                focusTile(0);
+                grid.post(() -> {
+                    showHomeTrending();
+                    tilesReady = true;
+                    startPendingSettingsReorder();
+                    showCardPrompt();
+                });
+            });
             return;
         }
         final boolean returnToLibrary = libraryFocusPending;
@@ -1233,6 +1321,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     @Override
     protected void onPause() {
         super.onPause();
+        if (resumedHome.get() == this) resumedHome.clear();
+        cancelPendingShelf();
         root.removeCallbacks(showIdleClock);
         endReorder();   // Home or another app while reordering keeps the order so far
         wallpaperPlayer.stop();
@@ -1260,6 +1350,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         handler.removeCallbacks(clockCheck);
         stopped = true;
         tileRefresh.onStop();
+        if (airPlayMusic != null) airPlayMusic.stop();
     }
 
     /**
@@ -1719,30 +1810,13 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         appLibrary.show();
     }
 
-    /**
-     * glass_style tvos, as on Apple TV: the focused tile itself lifts and catches the light; no pane is laid over it.
-     * It gets its own sheen (TileSheen, on its foreground), swept in from the side focus came from, and tilts a little
-     * towards that side before settling.
-     */
+    /** D-pad focus uses one lift/zoom with a quiet highlight; touch-style parallax is not replayed on each press. */
     private void catchLight(int position, int previous, View card) {
         if (!tvosFocus) return;
-        boolean moved = position != previous && animations && !reducedMotion;
-        boolean vertical = !singleRow && Math.abs(position - previous) >= COLUMNS;
-        boolean forward = position > previous;   // right, or down
         TileSheen sheen = card.getForeground() instanceof TileSheen ? (TileSheen) card.getForeground()
                 : new TileSheen(AppAdapter.cornerRadius(card.getWidth(), density));
         card.setForeground(sheen);
-        sheen.sweep(vertical ? (forward ? 0.1f : 0.6f) : (forward ? -0.35f : 0.95f), moved);
-        if (!moved) return;
-        float rx = vertical ? (forward ? 1f : -1f) : 0f;
-        float ry = vertical ? 0f : (forward ? -1f : 1f);
-        card.setCameraDistance(9000 * density);
-        AnimatorSet tilt = new AnimatorSet();
-        tilt.playTogether(ObjectAnimator.ofFloat(card, View.ROTATION_X, rx, 0f),
-                ObjectAnimator.ofFloat(card, View.ROTATION_Y, ry, 0f));
-        tilt.setDuration(480);
-        tilt.setInterpolator(new android.view.animation.PathInterpolator(0.2f, 0.8f, 0.2f, 1f));
-        tilt.start();
+        sheen.sweep(TileSheen.REST, false);
     }
 
     @Override
@@ -1822,8 +1896,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             showHero(position, scroll ? r.top - dy : r.top);
             dockTop = scroll ? r.top - dy : r.top;
             continueWatching.placeAbove(dockTop);
-            if (!homeTrending) continueWatching.showApp(adapter.packageAt(position), adapter.artworkAt(position));
+            if (!homeTrending) settleShelf(position, card);
         } else {
+            cancelPendingShelf();
             // Below the dock (or in a plain grid) the glow follows the tile without the big name; letting it
             // fade out left the grid on plain black.
             showGlowOnly(position);
@@ -1857,7 +1932,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      * Android would hand it to the first focusable view, the profile pill.
      */
     private void showHomeTrending() {
+        cancelPendingShelf();
         homeTrending = true;
+        setHeaderHiddenByScroll(false);
+        continueWatching.setHiddenByScroll(false);
         continueWatching.placeAbove(dockTop());
         continueWatching.showHomeTrending();
     }
@@ -2416,9 +2494,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
             if (position < COLUMNS) {
-                if (!continueWatching.isShown()) return false;   // dock row: let focus move to the top bar
-                continueWatching.focus();
-                return true;
+                flushPendingShelf(); // Up requests the focused app's shelf immediately, even before its dwell ends.
+                return continueWatching.focus();
             }
             target = position - COLUMNS;
         } else {
@@ -2854,6 +2931,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private boolean iconOnlyButtons;
     /** config.xml top_menu: Inputs, Wi-Fi and Settings folded into one gear. */
     private boolean topMenu;
+    private AirPlayMusic airPlayMusic;
     /** show_inputs_pill as configured: top_menu clears showInputsPill, so its Inputs row reads this. */
     private boolean showInputsMenuRow = true;
     private boolean launcherSettingsButton;
@@ -3018,7 +3096,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      *  low-memory TV the app can push the launcher out of memory, and an apply() still in flight was lost then, so
      *  every Home press opened the app again. */
     private boolean openLiveTvAfterBoot() {
-        String app = openOnStartChoice ? getSharedPreferences(Config.SETTINGS_NAME, MODE_PRIVATE)
+        String app = openOnStartChoice ? Profiles.preferences(this)
                 .getString(OpenOnStart.KEY, "") : "";
         if (!bootToLiveTv && app.isEmpty()) return false;
         int boot = OpenOnStart.boot(this);
@@ -3379,6 +3457,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
      * pills, with Sleep, Display, Apps and the launcher's own settings beside them.
      */
     private void showTopMenu() {
+        if (controlCenterPopup != null && controlCenterPopup.isShowing()) {
+            controlCenterPopup.dismiss();
+            return;
+        }
+        if (openPopup != null) openPopup.dismiss();
         View anchor = findViewById(R.id.btnSettings);
         final PopupWindow[] popup = new PopupWindow[1];
         List<ControlCenter.Action> actions = new ArrayList<>();
@@ -3393,6 +3476,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         actions.add(new ControlCenter.Action(R.drawable.ic_power, getString(R.string.cc_sleep), () -> {
             if (!HomeKeyService.sleep()) open(systemIntent(Settings.ACTION_SETTINGS));   // no helper running to sleep with
         }));
+        actions.add(new ControlCenter.Action(R.drawable.ic_audio, getString(R.string.cc_audio),
+                () -> open(systemIntent(Settings.ACTION_SOUND_SETTINGS))));
         actions.add(new ControlCenter.Action(R.drawable.ic_picture, getString(R.string.cc_display),
                 () -> open(systemIntent(Settings.ACTION_DISPLAY_SETTINGS))));
         actions.add(new ControlCenter.Action(R.drawable.ic_apps, getString(R.string.cc_apps),
@@ -3406,8 +3491,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }, density);
         popup[0] = glassPopup(panel, ControlCenter.widthPx(density));
         panel.setBackground(null);
-        popup[0].showAsDropDown(anchor, 0, (int) (10 * density),
-                getResources().getBoolean(R.bool.rtl_menu_bar) ? Gravity.START : Gravity.END);
+        controlCenterPopup = popup[0];
+        ControlCenter.setExpanded(true);
+        popup[0].setOnDismissListener(() -> {
+            ControlCenter.setExpanded(false);
+            if (controlCenterPopup == popup[0]) controlCenterPopup = null;
+            if (openPopup == popup[0]) openPopup = null;
+        });
+        popup[0].showAtLocation(root, Gravity.TOP | Gravity.RIGHT, (int) (56 * density), (int) (36 * density));
         panel.post(() -> Motion.reveal(panel, animations, reducedMotion));
         ControlCenter.focusFirst(panel);
     }

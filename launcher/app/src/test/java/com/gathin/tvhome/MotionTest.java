@@ -20,6 +20,15 @@ public class MotionTest {
     }
 
     @Test
+    public void focusZoomSettlesWithinAThirdOfASecond() {
+        // Scale threshold used by AndroidX: exercise the actual focus spring in both configured modes.
+        for (float damping : new float[]{Motion.FOCUS_DAMPING, 1f}) {
+            int frames = SpringFrames.toSettle(Motion.FOCUS_STIFFNESS, damping, 0.002f, 0.08f);
+            assertTrue("Focus zoom took " + frames + " frames", frames <= 20);
+        }
+    }
+
+    @Test
     public void reducedAnimationsLastAtMost100ms() {
         assertTrue(Motion.REDUCED_MS <= 100);
     }

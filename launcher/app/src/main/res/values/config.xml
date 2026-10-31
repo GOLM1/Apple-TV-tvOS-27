@@ -121,6 +121,11 @@
          the helper's own. Leave it off where a tap is one step. A theme can set it ("consume_volume_keys"). -->
     <bool name="consume_volume_keys">true</bool>
 
+    <!-- TVs whose single USB port comes up for ADB instead of drives and mice when USB debugging is on at boot
+         (TCL G05): debugging goes off at shutdown and back on after boot (UsbHostAtBoot). Needs the remote's
+         helper (HOME_KEY_SERVICE) and WRITE_SECURE_SETTINGS. -->
+    <bool name="usb_host_at_boot">true</bool>
+
     <!-- Vendor source numbers for the Inputs menu, "HW<n>=<number>" by the framework input id's last part
          (`tools/tv.py 'dumpsys tv_input'` lists them). A mapped input opens by sending input_action with the
          number as the int extra "input"; "HW<n>=-" leaves a port the board reports but the set does not have

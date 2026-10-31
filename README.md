@@ -18,6 +18,20 @@ An Apple TV / tvOS-style home screen for Android TV and Google TV, built on
 TMDB metadata needs your own read token in `launcher/local.properties` (`tmdbReadToken=...`) or the
 `TVHOME_TMDB_TOKEN` environment variable. Never publish a built APK: the token is inside it.
 
+## AirPlay music in Home
+
+The optional [AirPlay companion](companions/airplay-tv/PERSONAL_BUILD.md) is included as a separate
+Android project. It replaces the top-right clock with the current cover, song and artist while keeping
+the profile avatar. OK opens the full player; Right selects the profile menu. Trailer visuals continue
+with their sound muted during the music session. The clock returns when the session ends.
+
+The launcher and companion must be built with the same signing key. The local bridge does not require
+notification access or permission to draw over other apps. The TV's built-in AirPlay receiver stays
+separate. The companion includes its own GPL-3.0-or-later licence and third-party notices.
+
+This update also includes local profiles and character avatars, offline Home artwork/suggestions,
+bounded preview caches and the latest Control Center and carousel motion fixes.
+
 Not affiliated with or endorsed by Apple. Apple TV and tvOS are trademarks of Apple Inc.
 
 The original CleanYourTV README follows.

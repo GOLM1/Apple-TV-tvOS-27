@@ -95,4 +95,31 @@
         <item quantity="other">%1$d تطبيق</item>
     </plurals>
     <string name="greeting_with_name">%1$s، %2$s</string>
+    <string name="profile_default">الرئيسي</string>
+    <string name="profile_choose_hint">اختر بروفايلك للمتابعة.</string>
+    <string name="profile_manage_hint">اختر بروفايلاً لتعديل اسمه أو صورته.</string>
+    <string name="profile_hold_to_edit">اضغط مطولاً على OK لتعديل البروفايل</string>
+    <string name="profile_done">تم</string>
+    <string name="profiles_manage">البروفايلات والصور</string>
+    <string name="profiles_who">من يشاهد؟</string>
+    <string name="profiles_hint">لكل بروفايل تنسيقه وترتيب تطبيقاته واختصاراته. حسابات التطبيقات وقائمة متابعة المشاهدة مشتركة.</string>
+    <string name="profiles_switch">تبديل البروفايل</string>
+    <string name="profile_add">إضافة بروفايل</string>
+    <string name="profile_edit_named">تعديل %1$s</string>
+    <string name="profile_switch_named">التبديل إلى %1$s</string>
+    <string name="profile_rename">تعديل الاسم</string>
+    <string name="profile_picture">اختيار صورة البروفايل</string>
+    <string name="profile_delete">حذف البروفايل</string>
+    <string name="profile_delete_confirm">حذف %1$s وإعداداته في المشغّل؟ التطبيقات المثبّتة وحساباتها ستبقى.</string>
+    <string name="profile_keep_default">البروفايل الرئيسي يحتفظ بإعداداتك السابقة ولا يمكن حذفه.</string>
+    <string name="profile_invalid_name">اكتب اسماً من حرف إلى 32 حرفاً.</string>
+    <string name="profile_generic">الأيقونة الافتراضية</string>
+    <string name="profile_use_picture">استخدام هذه الصورة</string>
+    <string name="profiles_read_error">تعذّرت قراءة البروفايلات. بياناتك المحفوظة لم تتغيّر.</string>
+    <string name="profiles_save_error">تعذّر الحفظ. البروفايلات السابقة محفوظة.</string>
+    <string name="profile_image_loading">جارٍ تحميل الصورة…</string>
+    <string name="profile_image_error">الصورة غير متاحة. تحقق من الاتصال أو اختر صورة أخرى.</string>
+    <string name="profile_previous">السابق</string>
+    <string name="profile_gallery_credit">الصور: Netflix · التجميع: RchUncleSkeleton. الصورة المختارة تعمل بدون إنترنت.</string>
+    <string name="airplay_card_hint">اضغط OK لفتح الموسيقى. اليمين لتحديد البروفايل.</string>
 </resources>

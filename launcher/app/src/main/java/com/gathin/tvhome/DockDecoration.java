@@ -61,7 +61,7 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         edge.setStyle(Paint.Style.STROKE);
         edge.setStrokeWidth(density);
         edge.setColor(lightGlass ? 0x38FFFFFF : translucent ? 0x26FFFFFF : 0x1FFFFFFF);
-        glass = LiquidGlass.enabled ? new LiquidGlass.Surface(density, 0x10FFFFFF, true) : null;
+        glass = LiquidGlass.enabled ? new LiquidGlass.Surface(density, 0x3810141A, true, true) : null;
     }
 
     /** Concentric corners: the band's radius is the tiles' radius plus the band's padding around them. */
@@ -76,6 +76,10 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
     static float evenPaddingPx(int innerWidthPx, int columns, int tileWidthPx, float roomPx) {
         float gap = columns > 0 ? innerWidthPx / (float) columns - tileWidthPx : 0f;
         return Math.max(0f, Math.min(gap, roomPx));
+    }
+
+    static float focusPaddingPx(float tileSize, float scale, float gap) {
+        return gap + tileSize * Math.max(0f, scale - 1f) / 2f;
     }
 
     @Override
@@ -113,16 +117,28 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
             }
         }
         if (!any) return;
-        float pad = 14 * density;
+        float pad = (glass != null ? 10 : 14) * density;
         // The band can only draw inside the grid, and the first and last dock tiles sit 12dp in from its
         // edges: a full 14dp at the sides sliced the rounded ends flat (#454). Keep the sides, with the
         // 1dp edge line, inside the grid; the top and bottom have room.
         // 22dp at the sides (the grid's 10dp padding makes room): a focused first or last tile grows about 7dp
         // outwards and still keeps about the band's top margin from its rounded end.
-        float sidePad = 22 * density;
+        float sidePad = (glass != null ? 18 : 22) * density;
         float side = Math.max(0f, Math.min(sidePad, Math.min(rect.left, parent.getWidth() - rect.right) - density));
         float radius = AppAdapter.cornerRadius(cardWidth, density);
-        if (evenPadding) {
+        if (glass != null && !evenPadding && namesRoom == 0) {
+            // Reserve the maximum zoom once. With centred focus, the selected end tile has the same
+            // visible gap above, below and at the rounded end; moving focus never resizes the band.
+            float scale = parent.getAdapter() instanceof AppAdapter ? ((AppAdapter) parent.getAdapter()).focusScale() : 1f;
+            float growX = cardWidth * (scale - 1f) / 2f;
+            float gap = 10 * density;
+            if (!singleRow) gap = Math.max(0f, Math.min(gap,
+                    Math.min(rect.left, parent.getWidth() - rect.right) - density - growX));
+            float horizontal = focusPaddingPx(cardWidth, scale, gap);
+            float vertical = focusPaddingPx(AppAdapter.tileHeightPx(cardWidth), scale, gap);
+            rect.inset(-horizontal, -vertical);
+            radius = radiusPx(radius * scale, gap);
+        } else if (evenPadding) {
             // The same padding on all four sides, so the band's corners are concentric with the tiles' everywhere.
             int inner = parent.getWidth() - parent.getPaddingLeft() - parent.getPaddingRight();
             // A single row's tiles can run off the screen, so only its top limits the padding; its ends are clamped below.
@@ -133,7 +149,7 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         } else {
             // dock_even_padding off: the band as before, with its fixed 26 dp corners.
             rect.inset(singleRow ? -sidePad : -side, -pad);
-            radius = 26 * density;
+            radius = glass != null ? radiusPx(radius, pad) : 26 * density;
         }
         if (singleRow) {
             // Tiles past the screen's edge: the band stops at the grid's edge with its rounded end instead of being

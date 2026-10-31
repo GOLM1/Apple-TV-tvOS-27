@@ -26,4 +26,16 @@ public class ContinueWatchingTest {
         assertEquals("content://org.jellyfin/1", ContinueWatching.sharper("content://org.jellyfin/1"));
         assertEquals(null, ContinueWatching.sharper(null));
     }
+
+    @Test public void titleLogosCoverTheDisplayWidthWithoutChangingOtherImageSources() {
+        assertEquals("https://image.tmdb.org/t/p/w780/title.png",
+                ContinueWatching.sharperLogo("https://image.tmdb.org/t/p/w500/title.png"));
+        String wide = "https://image.tmdb.org/t/p/w1280/title.png";
+        assertEquals(wide, ContinueWatching.sharperLogo(wide));
+        String local = "content://example/title.png";
+        assertEquals(local, ContinueWatching.sharperLogo(local));
+        String other = "https://example.com/t/p/w500/title.png";
+        assertEquals(other, ContinueWatching.sharperLogo(other));
+        assertEquals(null, ContinueWatching.sharperLogo(null));
+    }
 }

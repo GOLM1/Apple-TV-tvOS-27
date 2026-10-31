@@ -129,6 +129,7 @@ final class ContinueWatching {
 
     private final Context ctx;
     private final TrailerBackdrop trailer;
+    void muteTrailers(boolean muted) { trailer.setMuted(muted); }
     private final View section, scrim;
     private final ImageView art, titleLogo;
     /** The outgoing picture during a crossfade between apps (holdOldArt); gone otherwise. */
@@ -139,7 +140,8 @@ final class ContinueWatching {
     private final ImageView appIcon, infoButton, nextButton;
     private final View progressRow;
     private final View progressFill;
-    private final LinearLayout dots;
+    private final PageIndicator dots;
+    private long advanceAt;
     private final Host host;
     private final float density;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -147,6 +149,9 @@ final class ContinueWatching {
     private List<Item> allItems = new ArrayList<>();
     private final List<Item> items = new ArrayList<>();
     private final List<Item> trendingItems = new ArrayList<>();
+    private final PagingRepeat pagingRepeat = new PagingRepeat();
+    private static final java.util.concurrent.ExecutorService LOCAL_IMAGES = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private static final java.util.concurrent.ExecutorService NETWORK_IMAGES = java.util.concurrent.Executors.newFixedThreadPool(2);
     /** The focused dock app, and its artwork for the backdrop when it published nothing. */
     private String app;
     private Drawable appArtwork;
@@ -162,7 +167,7 @@ final class ContinueWatching {
         final Item item;
         Bitmap artwork, logo;
         org.json.JSONObject details;
-        boolean artworkReady, titleReady;
+        boolean artworkReady, titleReady, preparing;
         final int index;
         Slide(Item item, Bitmap artwork, int index) {
             this.item = item; this.artwork = artwork; this.index = index;
@@ -206,7 +211,7 @@ final class ContinueWatching {
     private int slideDir = 1;
     private final Runnable advance = new Runnable() {
         @Override public void run() {
-            if (items.size() > 1 && !paused && !controlsFocused()) select((selected + 1) % items.size());
+            if (items.size() > 1 && !paused && !hiddenByScroll && !trailer.busy()) select((selected + 1) % items.size());
             scheduleAdvance();
         }
     };
@@ -215,18 +220,20 @@ final class ContinueWatching {
         this.motion = motion;
         ctx = a;
         this.host = host;
+        java.io.File offline = new java.io.File(a.getFilesDir(), "offline-artwork");
+        LOCAL_IMAGES.execute(() -> OfflineArtwork.cleanup(offline));
         // A disk cache under every HttpURLConnection (artwork, logos, TMDB): a slide seen before, today or after a
         // restart, comes off the disk instead of the network.
         if (android.net.http.HttpResponseCache.getInstalled() == null) {
             try {
-                android.net.http.HttpResponseCache.install(new java.io.File(a.getCacheDir(), "http"), 64L * 1024 * 1024);
+                android.net.http.HttpResponseCache.install(new java.io.File(a.getCacheDir(), "http"), 8L * 1024 * 1024);
             } catch (IOException e) {
                 Log.w(TAG, "no http cache: " + e.getClass().getSimpleName());
             }
         }
         section = a.findViewById(R.id.continueSection);
         art = a.findViewById(R.id.continueArt);
-        trailer = new TrailerBackdrop(art, this::scheduleAdvance, this::trailerEnded);
+        trailer = new TrailerBackdrop(art, this::scheduleAdvance, this::trailerEnded, this::trailerActive);
         LiquidGlass.setBackdropView(art);
         scrim = a.findViewById(R.id.continueScrim);
         title = a.findViewById(R.id.continueTitle);
@@ -297,7 +304,9 @@ final class ContinueWatching {
             if (launch != null) ctx.startActivity(launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         });
         nextButton.setOnClickListener(v -> {
-            if (items.size() > 1) select((selected + 1) % items.size());
+            if (items.size() > 1) {
+                select((selected + 1) % items.size());
+            }
         });
         LinearLayout progressLine = new LinearLayout(ctx);
         progressLine.setOrientation(LinearLayout.HORIZONTAL);
@@ -340,9 +349,18 @@ final class ContinueWatching {
         timeLp.leftMargin = Math.round(12 * density);
         progressLine.addView(timeLeft, timeLp);
 
-        dots = new LinearLayout(ctx);
-        dots.setOrientation(LinearLayout.HORIZONTAL);
-        dots.setGravity(Gravity.CENTER_VERTICAL);
+        dots = new PageIndicator(ctx, new PageIndicator.Progress() {
+            @Override public float fraction() {
+                float video = trailer.progress();
+                if (video >= 0f) return video;
+                return advanceAt == 0 ? 0f : 1f - (float) (advanceAt - android.os.SystemClock.uptimeMillis()) / ADVANCE_MS;
+            }
+            @Override public boolean running() {
+                return !paused && !hiddenByScroll && (trailer.progressRunning()
+                        || !trailer.busy() && advanceAt > 0);
+            }
+        });
+        trailer.onProgress(dots::invalidate);
         dots.setPadding(Math.round(10 * density), Math.round(6 * density),
                 Math.round(10 * density), Math.round(6 * density));
         dots.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -360,6 +378,7 @@ final class ContinueWatching {
         resume.setOnFocusChangeListener((v, focused) -> {
             if (focused) host.onRowFocused();
             styleResume(focused);
+            main.post(this::scheduleAdvance);
             v.animate().scaleX(focused && motion ? 1.025f : 1f).scaleY(focused && motion ? 1.025f : 1f)
                     .translationZ(focused ? 8 * density : 0f).setDuration(150).start();
         });
@@ -368,7 +387,7 @@ final class ContinueWatching {
             if (shown != null) open(shown.item);
         });
         // Left and Right walk Play and the round buttons, and page the slides past the row's ends (controlKey).
-        resume.setOnKeyListener((v, keyCode, event) -> event.getAction() == KeyEvent.ACTION_DOWN && controlKey(v, keyCode));
+        resume.setOnKeyListener((v, keyCode, event) -> event.getAction() == KeyEvent.ACTION_DOWN && controlKey(v, keyCode, event));
         section.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
             if (b - t != ob - ot) place();
         });
@@ -400,10 +419,11 @@ final class ContinueWatching {
         button.setOnFocusChangeListener((v, focused) -> {
             if (focused) host.onRowFocused();
             styleRound(button, focused);
+            main.post(this::scheduleAdvance);
             v.animate().scaleX(focused && motion ? 1.08f : 1f).scaleY(focused && motion ? 1.08f : 1f)
                     .translationZ(focused ? 8 * density : 0f).setDuration(150).start();
         });
-        button.setOnKeyListener((v, keyCode, event) -> event.getAction() == KeyEvent.ACTION_DOWN && controlKey(v, keyCode));
+        button.setOnKeyListener((v, keyCode, event) -> event.getAction() == KeyEvent.ACTION_DOWN && controlKey(v, keyCode, event));
         return button;
     }
 
@@ -436,9 +456,9 @@ final class ContinueWatching {
     /**
      * D-pad on the shelf's buttons, as in the Apple TV app: Up and Down leave; Left and Right move along the row, and
      * past its ends page the slides (Left on Play to the previous one, Right after the last button to the next one,
-     * back on Play), wrapping round at the first and the last slide.
+     * keeping focus on the button pressed), wrapping round at the first and the last slide.
      */
-    private boolean controlKey(View from, int keyCode) {
+    private boolean controlKey(View from, int keyCode, KeyEvent event) {
         switch (keyCode) {
             case KeyEvent.KEYCODE_DPAD_UP: host.leaveUp(); return true;
             case KeyEvent.KEYCODE_DPAD_DOWN: host.leaveDown(); return true;
@@ -450,8 +470,10 @@ final class ContinueWatching {
                 if (at >= 0 && at < row.size()) {
                     row.get(at).requestFocus();
                 } else if (items.size() > 1) {
-                    slideDir = step;
-                    select(pageTarget(selected, step, items.size()));   // focus stays on the button pressed
+                    if (pagingRepeat.accept(keyCode, event.getEventTime(), event.getRepeatCount() > 0)) {
+                        slideDir = step;
+                        select(pageTarget(selected, step, items.size()));
+                    }
                 }
                 return true;
             }
@@ -490,7 +512,9 @@ final class ContinueWatching {
     void setHiddenByScroll(boolean hidden) {
         if (hidden == hiddenByScroll) return;
         hiddenByScroll = hidden;
-        if (hidden) trailer.stop();
+        dots.setPaused(hidden || paused);
+        scheduleAdvance();
+        if (hidden) trailer.suspend();
         updateDotsVisibility();
         followGlass(400);
         if (drift != null) {
@@ -508,18 +532,24 @@ final class ContinueWatching {
             section.setAlpha(0f);
             section.setVisibility(View.VISIBLE);
             section.animate().alpha(1f).setDuration(200).start();
+            resumeTrailer();
         }
     }
 
     /** Focus Resume, on the slide showing now. */
-    void focus() {
+    boolean focus() {
+        if (hiddenByScroll || paused || items.isEmpty()) return false;
         if (isShown()) resume.requestFocus();
+        else restoreFocusWhenReady = true;
+        return true;
     }
 
     /** Home went to the background: no slides advance, so no pictures are fetched, while nobody sees them. */
     void pause() {
         paused = true;
-        trailer.stop();
+        advanceAt = 0;
+        dots.setPaused(true);
+        trailer.suspend();
         ++refreshGeneration;
         main.removeCallbacks(advance);
         if (drift != null) drift.pause();
@@ -527,18 +557,25 @@ final class ContinueWatching {
 
     /** Re-reads the list off the main thread; the shelf is rebuilt only when the focused app's share changed. */
     void refresh() {
+        boolean returning = paused;
         paused = false;
+        dots.setPaused(hiddenByScroll);
         followGlass(0);
         scheduleAdvance();
         if (drift != null && !hiddenByScroll) drift.resume();
         loadTrending(false);
         final int refresh = ++refreshGeneration;
+        if (returning) resumeTrailer();
         new Thread(() -> {
             List<Item> loaded = load(ctx);
             main.post(() -> {
                 if (refresh != refreshGeneration) return;
                 allItems = loaded;
                 if (!"__trending__".equals(app)) rebuild();
+                else if (trendingItems.isEmpty() && !loaded.isEmpty()) {
+                    trendingItems.addAll(loaded.subList(0, Math.min(10, loaded.size())));
+                    rebuildTrending();
+                }
                 warmDockApps(loaded);
             });
         }, TAG).start();
@@ -546,9 +583,14 @@ final class ContinueWatching {
 
     void loadTrending(boolean showWhenReady) {
         TitleMetadata.trending(ctx, list -> {
+            if (list == null || list.isEmpty()) {
+                if (showWhenReady && "__trending__".equals(app) && items.isEmpty()) host.leaveDown();
+                return;
+            }
+            boolean alreadyShowing = shownKey.startsWith("__trending__\n") && !items.isEmpty();
             trendingItems.clear();
-            if (list != null) trendingItems.addAll(list);
-            if (showWhenReady && "__trending__".equals(app)) {
+            trendingItems.addAll(list);
+            if (showWhenReady && "__trending__".equals(app) && !alreadyShowing) {
                 rebuildTrending();
             }
         });
@@ -557,11 +599,10 @@ final class ContinueWatching {
     void showHomeTrending() {
         app = "__trending__";
         appArtwork = null;
-        if (trendingItems.isEmpty()) {
-            loadTrending(true);
-        } else {
+        if (!trendingItems.isEmpty()) {
             rebuildTrending();
         }
+        loadTrending(true);
     }
 
     private void rebuildTrending() {
@@ -569,8 +610,9 @@ final class ContinueWatching {
         StringBuilder key = new StringBuilder("__trending__\n");
         for (Item item : trendingItems) key.append(item.intentUri).append('|').append(item.artUri).append('\n');
         if (key.toString().equals(shownKey)) {
+            // Home is an explicit reset even when the cached recommendations have not changed.
             restoreFocusWhenReady = true;
-            if (isShown()) focus();
+            if (!items.isEmpty()) select(0);
             return;
         }
         shownKey = key.toString();
@@ -586,15 +628,8 @@ final class ContinueWatching {
         section.setAlpha(0f);
         items.clear();
         items.addAll(trendingItems);
-        dots.removeAllViews();
+        dots.setCount(items.size());
         dots.setVisibility(View.GONE);
-        int size = Math.round(5 * density);
-        for (int i = 0; i < items.size() && items.size() > 1; i++) {
-            View dot = new View(ctx);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
-            if (i > 0) lp.leftMargin = Math.round(7 * density);
-            dots.addView(dot, lp);
-        }
         section.setVisibility(View.GONE);
         scrim.setAlpha(1f);
         if (items.isEmpty()) {
@@ -647,15 +682,8 @@ final class ContinueWatching {
         section.setAlpha(0f);
         items.clear();
         items.addAll(mine);
-        dots.removeAllViews();
+        dots.setCount(items.size());
         dots.setVisibility(View.GONE);
-        int size = Math.round(5 * density);
-        for (int i = 0; i < items.size() && items.size() > 1; i++) {
-            View dot = new View(ctx);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(size, size);
-            if (i > 0) lp.leftMargin = Math.round(7 * density);
-            dots.addView(dot, lp);
-        }
         boolean empty = items.isEmpty();
         section.setVisibility(View.GONE);
         scrim.setAlpha(1f);
@@ -682,7 +710,19 @@ final class ContinueWatching {
 
     private void scheduleAdvance() {
         main.removeCallbacks(advance);
-        if (!paused && items.size() > 1 && !trailer.busy()) main.postDelayed(advance, ADVANCE_MS);
+        advanceAt = 0;
+        if (!paused && !hiddenByScroll && items.size() > 1 && !trailer.busy()
+                && !dots.holding() && selection.visible() != null) {
+            advanceAt = android.os.SystemClock.uptimeMillis() + ADVANCE_MS;
+            main.postDelayed(advance, ADVANCE_MS);
+        }
+        dots.invalidate();
+    }
+
+    private void trailerActive() {
+        main.removeCallbacks(advance);
+        advanceAt = 0;
+        dots.invalidate();
     }
 
     /**
@@ -698,7 +738,12 @@ final class ContinueWatching {
     private void select(int index) {
         if (index < 0 || index >= items.size()) return;
         selected = index;
+        dots.beginSelection(index, motion);
+        updateDotsVisibility();
+        advanceAt = 0;
+        holdOldArt(); // Freeze the video before releasing it; never reveal its unrelated poster in between.
         trailer.stop();
+        if (drift != null) drift.cancel();
         Item item = items.get(index);
         final int request = selection.begin();
         main.removeCallbacks(advance);
@@ -708,7 +753,8 @@ final class ContinueWatching {
         if (art.getDrawable() != null) art.setAlpha(restingArtAlpha());
         Slide prepared = new Slide(item, null, index);
         Runnable ready = () -> {
-            if (!prepared.artworkReady || !prepared.titleReady || !selection.isCurrent(request)) return;
+            if (!prepared.artworkReady || !prepared.titleReady || prepared.preparing || !selection.isCurrent(request)) return;
+            prepared.preparing = true;
             // Hold the swap until the glass copy of the new picture exists too, so the backdrop and the dock change
             // in the same frame (at once when it is already blurred, as on a second visit).
             LiquidGlass.prepare(prepared.artwork, () -> {
@@ -716,53 +762,75 @@ final class ContinueWatching {
                 pendingSlide = prepared;
                 pendingRequest = request;
                 followGlass(700);
-                // Apple TV's carousel: the slide and its text move out the way you page, the next one glides in
-                // from the other side. The drift waits until it has landed.
-                boolean slide = motion && art.getDrawable() != null;
-                float shift = SLIDE_DP * density * slideDir;
+                // Keep the outgoing frame opaque until the incoming picture and glass are ready.
+                // Only the text dips; the two background layers crossfade without a black frame.
+                float shift = motion ? 10 * density * slideDir : 0f;
                 slideDir = 1;
                 art.animate().cancel();
                 section.animate().cancel();
-                section.animate().alpha(0f).translationX(-shift / 2).setInterpolator(SLIDE_OUT)
-                        .setDuration(slide ? 140 : 0).start();
-                art.animate().alpha(0f).translationX(-shift).setInterpolator(SLIDE_OUT)
-                        .setUpdateListener(a -> LiquidGlass.frame()).setDuration(slide ? 140 : 0)
+                section.animate().alpha(0f).translationX(-shift / 2).setStartDelay(0).setDuration(motion ? 100 : 0)
                         .withEndAction(() -> {
+                            if (!selection.isCurrent(request)) return;
+                            art.setScaleX(1f);
+                            art.setScaleY(1f);
+                            art.setTranslationX(shift);
+                            art.setAlpha(restingArtAlpha());
                             putUpPendingArt();
                             if (drift != null) drift.cancel();
+                            // putUpPendingArt resets the drift; establish the incoming transform after it.
                             art.setTranslationX(shift);
                             section.setAlpha(0f);
                             section.setTranslationX(shift / 2);
                             section.animate().alpha(1f).translationX(0f).setInterpolator(SLIDE_IN)
-                                    .setDuration(slide ? 320 : 0).start();
-                            art.animate().alpha(restingArtAlpha()).translationX(0f).setInterpolator(SLIDE_IN)
-                                    .setDuration(slide ? 320 : 0).withEndAction(this::startDrift).start();
+                                    .setStartDelay(motion ? 100 : 0).setDuration(motion ? 260 : 0).start();
+                            art.animate().translationX(0f).setInterpolator(SLIDE_IN)
+                                    .setUpdateListener(a -> LiquidGlass.frame())
+                                    .setDuration(motion ? 320 : 0).withEndAction(this::startDrift).start();
                         }).start();
             });
         };
         ArtCallback artworkReady = bitmap -> {
+            if (!selection.isCurrent(request)) return;
             prepared.artwork = bitmap;
             prepared.artworkReady = true;
             ready.run();
         };
         if (item.artUri == null || item.artUri.isEmpty()) artworkReady.onArt(null);
-        else loadArt(item.artUri, artworkReady);
+        else loadCachedImage(item.artUri, SHELF_ART_PX, false, bitmap -> {
+            artworkReady.onArt(bitmap);
+            if (bitmap == null) loadArt(item.artUri, downloaded -> {
+                if (downloaded == null || !selection.isCurrent(request)) return;
+                if (!prepared.preparing) artworkReady.onArt(downloaded);
+                else if (prepared.artwork == null) {
+                    prepared.artwork = downloaded;
+                    if (selection.visible() == prepared) setArt(downloaded);
+                }
+            });
+        });
         TitleMetadata.load(ctx, item, data -> {
             if (!selection.isCurrent(request)) return;
             prepared.details = data;
             String uri = data == null ? null : data.optString("logo", null);
             if (uri == null || uri.isEmpty()) uri = titleLogoUri(item);
+            if (prepared.preparing) {
+                if (uri != null && !unavailableLogos.contains(uri)) loadLogo(uri, ignored -> {});
+                if (selection.visible() == prepared) resumeTrailer();
+                return;
+            }
             if (uri == null || unavailableLogos.contains(uri)) {
                 prepared.titleReady = true;
                 ready.run();
                 return;
             }
             String logoUri = uri;
-            loadImage(uri, 800, true, bitmap -> {
-                if (bitmap == null) unavailableLogos.add(logoUri);
+            loadCachedLogo(uri, bitmap -> {
+                if (!selection.isCurrent(request) || prepared.preparing) return;
                 prepared.logo = bitmap;
                 prepared.titleReady = true;
                 ready.run();
+                if (bitmap == null) loadLogo(logoUri, downloaded -> {
+                    if (downloaded == null) unavailableLogos.add(logoUri);
+                });
             });
         });
     }
@@ -820,16 +888,7 @@ final class ContinueWatching {
             progressFill.setLayoutParams(lp);
             timeLeft.setText(item.positionMs > 0 ? ctx.getString(R.string.time_left, timeLeft(item)) : timeLeft(item));
         }
-        for (int i = 0; i < dots.getChildCount(); i++) {
-            GradientDrawable d = new GradientDrawable();
-            d.setCornerRadius(3 * density);
-            d.setColor(i == index ? 0xFFFFFFFF : 0x66FFFFFF);
-            View dot = dots.getChildAt(i);
-            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) dot.getLayoutParams();
-            lp.width = Math.round((i == index ? 14 : 5) * density);
-            dot.setLayoutParams(lp);
-            dot.setBackground(d);
-        }
+        dots.finishSelection(index);
         updateDotsVisibility();
         place();
         scheduleAdvance();
@@ -940,15 +999,7 @@ final class ContinueWatching {
             releaseOldArt();
             renderDetails(slide.item, slide.index);
             showTitleLogo(slide);
-            if (!paused && !hiddenByScroll) {
-                String homepage = slide.details == null ? null : slide.details.optString("homepage");
-                org.json.JSONArray videos = slide.details == null ? null : slide.details.optJSONArray("youtube_trailers");
-                String[] ids = new String[videos == null ? 0 : Math.min(3, videos.length())];
-                for (int i = 0; i < ids.length; i++) ids[i] = videos.optString(i);
-                trailer.show(TrailerSource.page(slide.item.intentUri, slide.item.programType == 0, homepage), ids);
-                prefetchAround(slide.index);
-                scheduleAdvance();
-            }
+            resumeTrailer();
             startDrift();
             return;
         }
@@ -960,12 +1011,27 @@ final class ContinueWatching {
         startDrift();
     }
 
+    /** Restart only the committed slide, including a one-item shelf, after pause or scrolling back up. */
+    private void resumeTrailer() {
+        Slide slide = selection.visible();
+        if (paused || hiddenByScroll || trailer.busy() || slide == null || slide.index != selected) return;
+        String homepage = slide.details == null ? null : slide.details.optString("homepage");
+        org.json.JSONArray videos = slide.details == null ? null : slide.details.optJSONArray("youtube_trailers");
+        String[] ids = new String[videos == null ? 0 : Math.min(3, videos.length())];
+        for (int i = 0; i < ids.length; i++) ids[i] = videos.optString(i);
+        trailer.show(TrailerSource.page(slide.item.intentUri, slide.item.programType == 0, homepage), ids);
+        prefetchAround(slide.index);
+        scheduleAdvance();
+    }
+
     /**
      * The slides either side of {@code index}, decoded ahead (picture and title logo) so paging to them swaps at once,
      * and the next one's trailer fetched too (TrailerBackdrop.prewarm).
      */
     private void prefetchAround(int index) {
         if (items.size() < 2) return;
+        Slide showing = selection.visible();
+        int refresh = refreshGeneration;
         Item previous = items.get((index - 1 + items.size()) % items.size());
         Item next = items.get((index + 1) % items.size());
         for (Item item : new Item[]{previous, next}) {
@@ -973,11 +1039,13 @@ final class ContinueWatching {
             TitleMetadata.load(ctx, item, data -> {
                 String uri = data == null ? null : data.optString("logo", null);
                 if (uri == null || uri.isEmpty()) uri = titleLogoUri(item);
-                if (uri != null && !unavailableLogos.contains(uri)) loadImage(uri, 800, true, bmp -> {});
+                if (uri != null && !unavailableLogos.contains(uri)) loadLogo(uri, bmp -> {});
             });
         }
         TitleMetadata.load(ctx, next, data -> {
-            if (data == null) return;
+            // Metadata can arrive after pause or another app/slide; it must not restart background work.
+            if (data == null || paused || hiddenByScroll || refresh != refreshGeneration
+                    || selection.visible() != showing || selected != index) return;
             org.json.JSONArray videos = data.optJSONArray("youtube_trailers");
             String[] ids = new String[videos == null ? 0 : Math.min(3, videos.length())];
             for (int i = 0; i < ids.length; i++) ids[i] = videos.optString(i);
@@ -996,20 +1064,16 @@ final class ContinueWatching {
             String art = item.artUri;
             TitleMetadata.load(ctx, item, data -> {
                 String logo = data == null ? null : data.optString("logo", null);
-                new Thread(() -> { warm(art); warm(logo); }, TAG).start();
+                warm(sharper(art));
+                warm(sharperLogo(logo));
             });
         }
     }
 
     /** Read an http(s) image through to the disk cache and drop it. */
-    private static void warm(String uri) {
+    private void warm(String uri) {
         if (uri == null || !uri.startsWith("http")) return;
-        try (InputStream in = new URL(uri).openStream()) {
-            byte[] buf = new byte[16 * 1024];
-            while (in.read(buf) > 0) { /* the cache keeps it */ }
-        } catch (IOException | RuntimeException ignored) {
-            // only a warm-up: the slide fetches it again when shown
-        }
+        NETWORK_IMAGES.execute(() -> imageBytes(ctx, uri, false));
     }
 
     /**
@@ -1036,13 +1100,16 @@ final class ContinueWatching {
         fade.setTranslationX(video ? 0f : art.getTranslationX());
         fade.setAlpha(video ? 1f : art.getAlpha());
         fade.setVisibility(View.VISIBLE);
+        LiquidGlass.holdBackdrop(fade);
     }
 
     private void releaseOldArt() {
         if (fade == null || fade.getVisibility() != View.VISIBLE) return;
-        fade.animate().alpha(0f).setDuration(motion ? 450 : 0).withEndAction(() -> {
+        fade.animate().alpha(0f).setDuration(motion ? 320 : 0)
+                .setUpdateListener(a -> LiquidGlass.frame()).withEndAction(() -> {
             fade.setVisibility(View.GONE);
             fade.setImageDrawable(null);
+            LiquidGlass.clearHeldBackdrop();
         }).start();
     }
 
@@ -1085,17 +1152,57 @@ final class ContinueWatching {
         loadImage(uri, SHELF_ART_PX, false, done);
     }
 
+    static String sharperLogo(String uri) {
+        String prefix = "https://image.tmdb.org/t/p/w500/";
+        return uri != null && uri.startsWith(prefix)
+                ? "https://image.tmdb.org/t/p/w780/" + uri.substring(prefix.length()) : uri;
+    }
+
+    /** Sized to cover the 640 px title region; a failed higher-resolution request retains the old source. */
+    private void loadLogo(String uri, ArtCallback done) {
+        String sharp = sharperLogo(uri);
+        if (uri.equals(sharp) || unavailableLogos.contains(sharp)) {
+            loadImage(uri, 800, true, done);
+            return;
+        }
+        loadImage(sharp, 800, true, bitmap -> {
+            if (bitmap != null) done.onArt(bitmap);
+            else {
+                unavailableLogos.add(sharp);
+                loadImage(uri, 800, true, done);
+            }
+        });
+    }
+
+    private void loadCachedLogo(String uri, ArtCallback done) {
+        String sharp = sharperLogo(uri);
+        loadCachedImage(sharp, 800, true, bitmap -> {
+            if (bitmap != null || uri.equals(sharp)) done.onArt(bitmap);
+            else loadCachedImage(uri, 800, true, done);
+        });
+    }
+
+    private void loadCachedImage(String uri, int maxWidth, boolean alpha, ArtCallback done) {
+        Bitmap cached = CACHE.get(uri);
+        if (cached != null) { done.onArt(cached); return; }
+        LOCAL_IMAGES.execute(() -> {
+            Bitmap bitmap = decode(ctx, uri, maxWidth, alpha, true);
+            if (bitmap != null) CACHE.put(uri, bitmap);
+            main.post(() -> done.onArt(bitmap));
+        });
+    }
+
     private void loadImage(String uri, int maxWidth, boolean alpha, ArtCallback done) {
         Bitmap cached = CACHE.get(uri);
         if (cached != null) {
             done.onArt(cached);
             return;
         }
-        new Thread(() -> {
-            Bitmap bmp = decode(ctx, uri, maxWidth, alpha);
+        NETWORK_IMAGES.execute(() -> {
+            Bitmap bmp = decode(ctx, uri, maxWidth, alpha, false);
             if (bmp != null) CACHE.put(uri, bmp);
             main.post(() -> done.onArt(bmp));
-        }, TAG).start();
+        });
     }
 
     /** Time left, as 28:15 or 1:02:40; the full length when nothing was watched yet. */
@@ -1216,9 +1323,18 @@ final class ContinueWatching {
     }
 
     /** content://, android.resource:// or http(s) artwork, downsampled to about {@code widthPx}. */
-    private static Bitmap decode(Context ctx, String uri, int widthPx, boolean alpha) {
-        byte[] bytes;
-        try (InputStream in = open(ctx, uri)) {
+    private static byte[] imageBytes(Context ctx, String uri, boolean localOnly) {
+        boolean remote = uri.startsWith("http://") || uri.startsWith("https://");
+        java.io.File directory = new java.io.File(ctx.getFilesDir(), "offline-artwork");
+        if (remote) {
+            byte[] saved = OfflineArtwork.read(directory, uri);
+            if (saved != null) {
+                if (validImage(saved)) return saved;
+                OfflineArtwork.remove(directory, uri);
+            }
+            if (localOnly && android.net.http.HttpResponseCache.getInstalled() == null) return null;
+        }
+        try (InputStream in = open(ctx, uri, localOnly)) {
             if (in == null) return null;
             ByteArrayOutputStream out = new ByteArrayOutputStream();
             byte[] buf = new byte[16 * 1024];
@@ -1227,11 +1343,25 @@ final class ContinueWatching {
                 // ponytail: 4 MB cap per image keeps a huge poster from eating the TV's memory; stream-decode if needed.
                 if (out.size() > 4 * 1024 * 1024) return null;
             }
-            bytes = out.toByteArray();
+            byte[] bytes = out.toByteArray();
+            if (remote && validImage(bytes)) OfflineArtwork.save(directory, uri, bytes);
+            return bytes;
         } catch (IOException | RuntimeException e) {
-            Log.w(TAG, "Image unavailable (" + Uri.parse(uri).getHost() + "): " + e.getClass().getSimpleName());
+            if (!localOnly) Log.w(TAG, "Image unavailable (" + Uri.parse(uri).getHost() + "): " + e.getClass().getSimpleName());
             return null;
         }
+    }
+
+    private static boolean validImage(byte[] bytes) {
+        BitmapFactory.Options bounds = new BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.length, bounds);
+        return bounds.outWidth > 0 && bounds.outHeight > 0;
+    }
+
+    private static Bitmap decode(Context ctx, String uri, int widthPx, boolean alpha, boolean localOnly) {
+        byte[] bytes = imageBytes(ctx, uri, localOnly);
+        if (bytes == null) return null;
         BitmapFactory.Options opts = new BitmapFactory.Options();
         opts.inJustDecodeBounds = true;
         BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
@@ -1243,12 +1373,13 @@ final class ContinueWatching {
         return BitmapFactory.decodeByteArray(bytes, 0, bytes.length, opts);
     }
 
-    private static InputStream open(Context ctx, String uri) throws IOException {
+    private static InputStream open(Context ctx, String uri, boolean cachedOnly) throws IOException {
         String scheme = Uri.parse(uri).getScheme();
         if ("http".equals(scheme) || "https".equals(scheme)) {
             HttpURLConnection conn = (HttpURLConnection) new URL(uri).openConnection();
             conn.setConnectTimeout(5000);
             conn.setReadTimeout(8000);
+            if (cachedOnly) conn.setRequestProperty("Cache-Control", "only-if-cached, max-stale=2147483647");
             return conn.getInputStream();
         }
         return ctx.getContentResolver().openInputStream(Uri.parse(uri));

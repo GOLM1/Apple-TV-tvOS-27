@@ -158,7 +158,37 @@
     <string name="cc_apps">Apps</string>
     <string name="cc_wifi">Wi-Fi</string>
     <string name="cc_bluetooth">Bluetooth</string>
+    <string name="cc_audio">Audio</string>
+    <string name="cc_back_home">Back to Home</string>
+    <string name="cc_account_settings">Account settings</string>
     <string name="tmdb_credit" translatable="false">Metadata and title artwork: TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB.</string>
     <string name="cc_info">Info</string>
     <string name="cc_next">Next</string>
+    <string name="profile_default">Home</string>
+    <string name="profile_choose_hint">Choose your profile to continue.</string>
+    <string name="profile_manage_hint">Choose a profile to edit its name or picture.</string>
+    <string name="profile_hold_to_edit">Hold OK on a profile to edit</string>
+    <string name="profile_done">Done</string>
+    <string name="profiles_manage">Profiles and pictures</string>
+    <string name="profiles_who">Who is watching?</string>
+    <string name="profiles_hint">Each profile keeps its own layout, app order and Home shortcuts. Streaming accounts and Continue Watching are shared.</string>
+    <string name="profiles_switch">Switch profile</string>
+    <string name="profile_add">Add profile</string>
+    <string name="profile_edit_named">Edit %1$s</string>
+    <string name="profile_switch_named">Switch to %1$s</string>
+    <string name="profile_rename">Rename</string>
+    <string name="profile_picture">Choose profile picture</string>
+    <string name="profile_delete">Delete profile</string>
+    <string name="profile_delete_confirm">Delete %1$s and its launcher choices? Installed apps and their accounts will stay.</string>
+    <string name="profile_keep_default">The original profile keeps your existing setup and cannot be deleted.</string>
+    <string name="profile_invalid_name">Enter a name between 1 and 32 characters.</string>
+    <string name="profile_generic">Default icon</string>
+    <string name="profile_use_picture">Use this picture</string>
+    <string name="profiles_read_error">Profiles could not be read. Your saved data has been kept.</string>
+    <string name="profiles_save_error">Could not save. Your existing profiles have been kept.</string>
+    <string name="profile_image_loading">Loading picture…</string>
+    <string name="profile_image_error">Picture unavailable. Check your connection or choose another picture.</string>
+    <string name="profile_previous">Previous</string>
+    <string name="profile_gallery_credit">Images: Netflix · Catalogue: RchUncleSkeleton. Selected pictures remain available offline.</string>
+    <string name="airplay_card_hint">OK opens music. Right selects the profile menu.</string>
 </resources>

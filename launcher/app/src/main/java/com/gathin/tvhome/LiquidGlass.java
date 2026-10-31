@@ -55,6 +55,27 @@ final class LiquidGlass {
     private static Bitmap videoBackdrop, videoClear;
     private static BitmapShader videoShader, videoClearShader;
     private static int[] videoPixels;
+    private static float videoAlpha = 1f;
+    /** The exact outgoing glass layer, frozen with ContinueWatching's outgoing ImageView. */
+    private static Bitmap heldBackdrop, heldClear;
+    private static BitmapShader heldShader, heldClearShader;
+    private static java.lang.ref.WeakReference<View> heldView = new java.lang.ref.WeakReference<>(null);
+
+    static void holdBackdrop(View outgoing) {
+        heldView = new java.lang.ref.WeakReference<>(outgoing);
+        heldBackdrop = videoShader != null ? videoBackdrop : backdrop;
+        heldClear = videoShader != null ? videoClear : clearBackdrop;
+        heldShader = heldBackdrop == null ? null : new BitmapShader(heldBackdrop, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+        heldClearShader = heldClear == null ? null : new BitmapShader(heldClear, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+        frame();
+    }
+
+    static void clearHeldBackdrop() {
+        heldView.clear();
+        heldBackdrop = heldClear = null;
+        heldShader = heldClearShader = null;
+        frame();
+    }
     /** Builds the backdrop copies off the main thread (setBackdrop); the newest request wins. */
     private static final java.util.concurrent.ExecutorService BUILDER =
             java.util.concurrent.Executors.newSingleThreadExecutor();
@@ -90,7 +111,13 @@ final class LiquidGlass {
      * request's {@code ready} runs.
      */
     static void prepare(Bitmap art, Runnable ready) {
-        if (art == null) return;
+        if (art == null) {
+            // Missing artwork still completes the slide; no older blur callback may win afterwards.
+            onPrepared = null;
+            onPreparedFor = null;
+            if (ready != null) ready.run();
+            return;
+        }
         if (art == preparedFor) {
             onPrepared = null;
             if (ready != null) ready.run();
@@ -154,7 +181,10 @@ final class LiquidGlass {
      * while set, the glass shows it instead of the poster under the video, which it would otherwise keep showing.
      * Null when the trailer stops. The frame already fills the screen as shown, so no drift is applied to it.
      */
-    static void setVideoFrame(Bitmap frame) {
+    static void setVideoFrame(Bitmap frame) { setVideoFrame(frame, 1f); }
+
+    static void setVideoFrame(Bitmap frame, float alpha) {
+        videoAlpha = alpha;
         if (frame == null) {
             videoBackdrop = videoClear = null;
             videoShader = videoClearShader = null;
@@ -214,6 +244,19 @@ final class LiquidGlass {
         return Math.round(a + (b - a) * (at - i));
     }
 
+    /**
+     * Apply the glass's translucency to the composed scene, not independently to every source image.
+     * Compensating for the layers above keeps their source-over result equal to one translucent composite,
+     * without allocating a full-size offscreen layer for every glass surface on every video frame.
+     */
+    static float layerOpacity(float sourceAlpha, float aboveAlpha, boolean clear) {
+        float source = Math.max(0f, Math.min(1f, sourceAlpha));
+        float above = Math.max(0f, Math.min(1f, aboveAlpha));
+        float material = clear ? 175f / 255f : 1f;
+        float remaining = 1f - material * above;
+        return remaining <= 0f ? 0f : material * source * (1f - above) / remaining;
+    }
+
     /** The view the backdrop shows in; its scale, translation and alpha are read on every draw. */
     static void setBackdropView(View view) {
         backdropView = view;
@@ -233,6 +276,8 @@ final class LiquidGlass {
     static final class Surface {
         private boolean sampleBackdrop = true;
         private final boolean clear;
+        /** The large dock needs a quieter edge than small clear buttons. */
+        private final boolean quiet;
         private final Paint bevel = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint sheen = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint blur = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
@@ -246,9 +291,14 @@ final class LiquidGlass {
         Surface(float density, int tintArgb) { this(density, tintArgb, false); }
 
         Surface(float density, int tintArgb, boolean clear) {
+            this(density, tintArgb, clear, false);
+        }
+
+        Surface(float density, int tintArgb, boolean clear, boolean quiet) {
             this.clear = clear;
+            this.quiet = quiet;
             bevel.setStyle(Paint.Style.STROKE);
-            bevel.setStrokeWidth(3 * density);
+            bevel.setStrokeWidth((quiet ? 1f : 3f) * density);
             tint.setColor(tintArgb);
             // Vibrancy instead of a milky wash: what shows through is a touch more saturated, never brighter, so the
             // glass is as dark as the shaded backdrop around it.
@@ -256,9 +306,9 @@ final class LiquidGlass {
             vibrancy.setSaturation(clear ? 1.06f : 1.15f);
             blur.setColorFilter(new ColorMatrixColorFilter(vibrancy));
             glow.setStyle(Paint.Style.STROKE);
-            glow.setStrokeWidth(2 * density);
+            glow.setStrokeWidth((quiet ? 1f : 2f) * density);
             rim.setStyle(Paint.Style.STROKE);
-            rim.setStrokeWidth(density);
+            rim.setStrokeWidth((quiet ? 0.6f : 1f) * density);
         }
 
         /** Draws the glass in {@code rect} (in {@code host}'s coordinates) on {@code c}. */
@@ -267,17 +317,21 @@ final class LiquidGlass {
                     || rect.bottom != shaderBottom) {
                 // A thin line of light, brightest at the top-left and bottom-right corners, as on Apple's glass.
                 rim.setShader(new LinearGradient(rect.left, rect.top, rect.right, rect.bottom,
-                        new int[]{0xE6FFFFFF, 0x26FFFFFF, 0x1AFFFFFF, 0x8CFFFFFF}, new float[]{0f, 0.35f, 0.7f, 1f},
+                        quiet ? new int[]{0x50FFFFFF, 0x10FFFFFF, 0x08FFFFFF, 0x30FFFFFF}
+                                : new int[]{0xE6FFFFFF, 0x26FFFFFF, 0x1AFFFFFF, 0x8CFFFFFF},
+                        new float[]{0f, 0.35f, 0.7f, 1f},
                         Shader.TileMode.CLAMP));
                 // A faint light just inside the edge, strongest at the top: a hint of the glass's thickness.
-                glow.setShader(new LinearGradient(0, rect.top, 0, rect.bottom, 0x14FFFFFF, 0x03FFFFFF,
+                glow.setShader(new LinearGradient(0, rect.top, 0, rect.bottom, quiet ? 0x08FFFFFF : 0x14FFFFFF, quiet ? 0x00FFFFFF : 0x03FFFFFF,
                         Shader.TileMode.CLAMP));
                 if (clear) {
                     bevel.setShader(new LinearGradient(rect.left, rect.top, rect.right, rect.bottom,
-                            new int[]{0x48FFFFFF, 0x06FFFFFF, 0x20000000, 0x38FFFFFF},
+                            quiet ? new int[]{0x14FFFFFF, 0x00FFFFFF, 0x10000000, 0x0CFFFFFF}
+                                    : new int[]{0x48FFFFFF, 0x06FFFFFF, 0x20000000, 0x38FFFFFF},
                             new float[]{0f, 0.3f, 0.7f, 1f}, Shader.TileMode.CLAMP));
                     sheen.setShader(new LinearGradient(0, rect.top, 0, rect.bottom,
-                            new int[]{0x1CFFFFFF, 0x02FFFFFF, 0x00FFFFFF},
+                            quiet ? new int[]{0x08FFFFFF, 0x00FFFFFF, 0x00FFFFFF}
+                                    : new int[]{0x1CFFFFFF, 0x02FFFFFF, 0x00FFFFFF},
                             new float[]{0f, 0.35f, 1f}, Shader.TileMode.CLAMP));
                 }
                 shaderLeft = rect.left;
@@ -285,40 +339,19 @@ final class LiquidGlass {
                 shaderRight = rect.right;
                 shaderBottom = rect.bottom;
             }
-            // A playing trailer takes the poster's place: it covers the poster, so the glass shows the video.
-            boolean video = videoShader != null;
-            Bitmap texture = video ? (clear ? videoClear : videoBackdrop) : (clear ? clearBackdrop : backdrop);
-            BitmapShader shader = video ? (clear ? videoClearShader : videoShader) : (clear ? clearShader : backdropShader);
-            if (sampleBackdrop && shader != null && texture != null) {
-                // The backdrop fills the screen centre-cropped (continueArt); map its pixels to this view's.
-                DisplayMetrics dm = host.getResources().getDisplayMetrics();
-                float scale = Math.max((float) dm.widthPixels / texture.getWidth(),
-                        (float) dm.heightPixels / texture.getHeight());
-                host.getLocationOnScreen(location);
-                matrix.setScale(scale, scale);
-                matrix.postTranslate((dm.widthPixels - texture.getWidth() * scale) / 2f,
-                        (dm.heightPixels - texture.getHeight() * scale) / 2f);
-                float alpha = 1f;
-                View art = backdropView;
-                if (art != null && !video) {
-                    // The picture's own slow zoom and drift (ContinueWatching.startDrift), then its fade.
-                    matrix.postScale(art.getScaleX(), art.getScaleY(),
-                            art.getLeft() + art.getPivotX(), art.getTop() + art.getPivotY());
-                    matrix.postTranslate(art.getTranslationX(), art.getTranslationY());
-                    alpha = art.getAlpha();
-                }
-                if (clear) {
-                    // A restrained lens magnification gives clear glass a small optical displacement.
-                    matrix.postScale(1.025f, 1.025f, location[0] + rect.centerX(), location[1] + rect.centerY());
-                }
-                matrix.postTranslate(-location[0], -location[1]);
-                shader.setLocalMatrix(matrix);
-                blur.setShader(shader);
-                blur.setAlpha(Math.round((clear ? 175 : 255) * alpha));
-                c.drawRoundRect(rect, radius, radius, blur);
-                float y = (location[1] + rect.centerY()) / dm.heightPixels;
-                dim.setColor(Math.round(scrimAlpha(y) * (clear ? 0.35f : SCRIM_SHARE)) << 24);
-                c.drawRoundRect(rect, radius, radius, dim);
+            if (sampleBackdrop) {
+                View outgoing = heldView.get();
+                float held = (clear ? heldClearShader : heldShader) == null || outgoing == null
+                        || outgoing.getVisibility() != View.VISIBLE ? 0f : outgoing.getAlpha();
+                float video = (clear ? videoClearShader : videoShader) == null ? 0f : videoAlpha;
+                float poster = backdropView == null ? 1f : backdropView.getAlpha();
+                drawBackdrop(c, rect, radius, host, clear ? clearBackdrop : backdrop,
+                        clear ? clearShader : backdropShader, backdropView,
+                        layerOpacity(poster, held + video * (1f - held), clear));
+                drawBackdrop(c, rect, radius, host, clear ? videoClear : videoBackdrop,
+                        clear ? videoClearShader : videoShader, null, layerOpacity(video, held, clear));
+                drawBackdrop(c, rect, radius, host, clear ? heldClear : heldBackdrop,
+                        clear ? heldClearShader : heldShader, outgoing, layerOpacity(held, 0f, clear));
             }
             c.drawRoundRect(rect, radius, radius, tint);
             if (clear) {
@@ -327,6 +360,37 @@ final class LiquidGlass {
             }
             inset(c, rect, radius, glow.getStrokeWidth(), glow);
             inset(c, rect, radius, rim.getStrokeWidth(), rim);
+        }
+
+        /** Same layer order and alpha as the background views: poster, video, outgoing snapshot. */
+        private void drawBackdrop(Canvas c, RectF rect, float radius, View host, Bitmap texture,
+                BitmapShader shader, View art, float opacity) {
+            if (shader == null || texture == null || opacity <= 0f) return;
+            // The backdrop fills the screen centre-cropped (continueArt); map its pixels to this view's.
+            DisplayMetrics dm = host.getResources().getDisplayMetrics();
+            float scale = Math.max((float) dm.widthPixels / texture.getWidth(),
+                    (float) dm.heightPixels / texture.getHeight());
+            host.getLocationOnScreen(location);
+            matrix.setScale(scale, scale);
+            matrix.postTranslate((dm.widthPixels - texture.getWidth() * scale) / 2f,
+                    (dm.heightPixels - texture.getHeight() * scale) / 2f);
+            float alpha = opacity;
+            if (art != null) {
+                // The picture's own slow zoom and drift (ContinueWatching.startDrift), then its fade.
+                matrix.postScale(art.getScaleX(), art.getScaleY(),
+                        art.getLeft() + art.getPivotX(), art.getTop() + art.getPivotY());
+                matrix.postTranslate(art.getTranslationX(), art.getTranslationY());
+                // Opacity was composed with the other scene layers before this draw.
+            }
+            if (clear) {
+                // A restrained lens magnification gives clear glass a small optical displacement.
+                matrix.postScale(1.025f, 1.025f, location[0] + rect.centerX(), location[1] + rect.centerY());
+            }
+            matrix.postTranslate(-location[0], -location[1]);
+            shader.setLocalMatrix(matrix);
+            blur.setShader(shader);
+            blur.setAlpha(Math.round(255f * alpha));
+            c.drawRoundRect(rect, radius, radius, blur);
         }
 
         /** A stroke of {@code width} drawn just inside {@code rect}'s edge, following its corners. */

@@ -22,37 +22,65 @@ final class TitleMetadata {
     interface TrendingCallback { void ready(List<ContinueWatching.Item> items); }
 
     private static final ExecutorService WORKER = Executors.newFixedThreadPool(2);
+    private static final ExecutorService LOCAL = Executors.newSingleThreadExecutor();
+    private static final ExecutorService HOME = Executors.newSingleThreadExecutor();
+    private static final java.util.concurrent.atomic.AtomicBoolean HOME_REFRESH = new java.util.concurrent.atomic.AtomicBoolean();
+
+    private static String key(ContinueWatching.Item item) {
+        return item.packageName + ":" + item.title + ":" + item.subtitle + ":" + item.releaseDate + ":" + item.programType;
+    }
 
     static void load(Context context, ContinueWatching.Item item, Callback callback) {
         Context ctx = context.getApplicationContext();
-        WORKER.execute(() -> {
-            JSONObject result = null;
+        LOCAL.execute(() -> {
+            JSONObject cached = null;
             try {
-                String token = ctx.getString(R.string.tmdb_read_token);
-                if (!token.isEmpty()) result = resolve(ctx, token, item);
-            } catch (Exception error) {
-                android.util.Log.w("TitleMetadata", "Metadata unavailable: " + error.getClass().getSimpleName());
-            }
-            JSONObject resolved = result;
-            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> callback.ready(resolved));
+                String stored = ctx.getSharedPreferences("title_metadata_v6", Context.MODE_PRIVATE).getString(key(item), null);
+                if (stored != null) cached = new JSONObject(stored);
+            } catch (Exception ignored) { }
+            JSONObject local = cached != null && cached.optBoolean("found") ? cached : null;
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> callback.ready(local));
+            if (cached != null && System.currentTimeMillis() - cached.optLong("saved") < cached.optLong("ttl")) return;
+            WORKER.execute(() -> {
+                try {
+                    String token = ctx.getString(R.string.tmdb_read_token);
+                    JSONObject fresh = token.isEmpty() ? null : resolve(ctx, token, item);
+                    if (fresh != null) new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> callback.ready(fresh));
+                } catch (Exception error) {
+                    android.util.Log.w("TitleMetadata", "Metadata unavailable: " + error.getClass().getSimpleName());
+                }
+            });
         });
     }
 
     static void trending(Context context, TrendingCallback callback) {
         Context ctx = context.getApplicationContext();
-        WORKER.execute(() -> {
+        LOCAL.execute(() -> {
+            List<ContinueWatching.Item> list = new ArrayList<>();
+            SharedPreferences cache = ctx.getSharedPreferences("home_trending", Context.MODE_PRIVATE);
+            String cached = cache.getString("items", null);
+            long saved = cache.getLong("saved", 0);
+            if (cached == null) {
+                SharedPreferences legacy = ctx.getSharedPreferences("title_metadata_v6", Context.MODE_PRIVATE);
+                cached = legacy.getString("__trending_cache__", null);
+                saved = legacy.getLong("__trending_saved__", 0);
+            }
+            try {
+                JSONArray rows = cached == null ? null : new JSONArray(cached);
+                for (int i = 0; rows != null && i < Math.min(10, rows.length()); i++) list.add(deserializeItem(rows.getJSONObject(i)));
+            } catch (Exception ignored) { }
+            List<ContinueWatching.Item> local = list;
+            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> callback.ready(local));
+            if (!list.isEmpty() && System.currentTimeMillis() - saved < 4 * 60 * 60 * 1000L) return;
+            if (HOME_REFRESH.compareAndSet(false, true)) HOME.execute(() -> refreshTrending(ctx, cache, callback));
+        });
+    }
+
+    private static void refreshTrending(Context ctx, SharedPreferences cache, TrendingCallback callback) {
             List<ContinueWatching.Item> list = new ArrayList<>();
             try {
                 String token = ctx.getString(R.string.tmdb_read_token);
                 if (!token.isEmpty()) {
-                    SharedPreferences cache = ctx.getSharedPreferences("title_metadata_v6", Context.MODE_PRIVATE);
-                    String cached = cache.getString("__trending_cache__", null);
-                    long saved = cache.getLong("__trending_saved__", 0);
-                    if (cached != null && System.currentTimeMillis() - saved < 4 * 60 * 60 * 1000L) {
-                        JSONArray arr = new JSONArray(cached);
-                        for (int i = 0; i < arr.length(); i++) list.add(deserializeItem(arr.getJSONObject(i)));
-                    }
-                    if (list.isEmpty()) {
                         JSONObject resp = get(token, "/trending/all/day?language=en-US");
                         if (resp != null) {
                             JSONArray results = resp.optJSONArray("results");
@@ -77,18 +105,16 @@ final class TitleMetadata {
                                 toCache.put(serializeItem(item));
                             }
                             if (!list.isEmpty()) {
-                                cache.edit().putString("__trending_cache__", toCache.toString())
-                                        .putLong("__trending_saved__", System.currentTimeMillis()).apply();
+                                cache.edit().putString("items", toCache.toString())
+                                        .putLong("saved", System.currentTimeMillis()).apply();
                             }
                         }
-                    }
                 }
             } catch (Exception error) {
                 android.util.Log.w("TitleMetadata", "Trending unavailable: " + error.getClass().getSimpleName());
-            }
+            } finally { HOME_REFRESH.set(false); }
             List<ContinueWatching.Item> readyList = list;
-            new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> callback.ready(readyList));
-        });
+            if (!list.isEmpty()) new android.os.Handler(android.os.Looper.getMainLooper()).post(() -> callback.ready(readyList));
     }
 
     private static JSONObject serializeItem(ContinueWatching.Item item) throws Exception {
@@ -119,7 +145,7 @@ final class TitleMetadata {
                     .put("metadata", "TV Show · Drama · Romance");
         }
         SharedPreferences cache = ctx.getSharedPreferences("title_metadata_v6", Context.MODE_PRIVATE);
-        String key = item.packageName + ":" + item.title + ":" + item.subtitle + ":" + item.releaseDate + ":" + item.programType;
+        String key = key(item);
         String stored = cache.getString(key, null);
         if (stored != null) {
             JSONObject old = new JSONObject(stored);
@@ -220,7 +246,18 @@ final class TitleMetadata {
             if (best != null) result.put("logo", "https://image.tmdb.org/t/p/w500" + best.getString("file_path"));
         }
         // Bound storage without clearing other launcher preferences.
-        if (cache.getAll().size() > 120) cache.edit().clear().apply();
+        if (cache.getAll().size() > 120) {
+            String oldest = null;
+            long saved = Long.MAX_VALUE;
+            for (java.util.Map.Entry<String, ?> entry : cache.getAll().entrySet()) {
+                if (entry.getKey().startsWith("__") || !(entry.getValue() instanceof String)) continue;
+                try {
+                    long stamp = new JSONObject((String) entry.getValue()).optLong("saved");
+                    if (stamp < saved) { saved = stamp; oldest = entry.getKey(); }
+                } catch (Exception ignored) { }
+            }
+            if (oldest != null) cache.edit().remove(oldest).apply();
+        }
         cache.edit().putString(key, result.toString()).apply();
         return match == null ? null : result;
     }

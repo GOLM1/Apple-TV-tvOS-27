@@ -1,0 +1,8 @@
+Public avatar image references from RchUncleSkeleton's Netflix Icons Master, accessed 2026-10-30.
+https://www.reddit.com/r/netflix/comments/13h9uhr/netflix_profile_icons_compilation_project/
+https://docs.google.com/spreadsheets/d/1T5q4qNTFOiU-45iTDUDDkxsj_Hb9S9mZpg4GyLNYarw/edit
+
+Images are served by Netflix's public image CDN and remain the property of their respective owners.
+This private launcher is not affiliated with Netflix. No image binaries, account cookies or Netflix profile
+mutation tools are bundled. The gallery downloads a visible page on demand; only selected pictures are
+saved outside the bounded artwork cache. No AI-generated avatars are included.

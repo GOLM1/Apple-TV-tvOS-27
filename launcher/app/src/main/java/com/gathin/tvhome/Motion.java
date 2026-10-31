@@ -16,6 +16,10 @@ final class Motion {
     /** The spring stops once it is within this many pixels of its target. */
     static final float REDUCED_MIN_CHANGE = 2f;
 
+    /** One quick, nearly critically damped response for all properties of a focused tile. */
+    static final float FOCUS_STIFFNESS = 500f;
+    static final float FOCUS_DAMPING = 0.98f;
+
     private Motion() {
     }
 
@@ -38,7 +42,7 @@ final class Motion {
         }
         private static SpringAnimation spring(View view, DynamicAnimation.ViewProperty property, boolean bounce) {
             SpringAnimation animation = new SpringAnimation(view, property);
-            animation.setSpring(new SpringForce().setStiffness(260f).setDampingRatio(bounce ? 0.96f : 1f));
+            animation.setSpring(new SpringForce().setStiffness(FOCUS_STIFFNESS).setDampingRatio(bounce ? FOCUS_DAMPING : 1f));
             return animation;
         }
         void to(float scale, float translation, float z) {

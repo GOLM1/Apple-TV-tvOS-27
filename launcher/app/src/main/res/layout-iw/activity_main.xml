@@ -14,6 +14,22 @@
         android:layout_height="match_parent"
         android:importantForAccessibility="no" />
 
+    <!-- Continue watching shelf: the selected item's artwork, full screen, with a scrim for the title and the dock. -->
+    <ImageView
+        android:id="@+id/continueArt"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="centerCrop"
+        android:alpha="0"
+        android:importantForAccessibility="no" />
+
+    <View
+        android:id="@+id/continueScrim"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:alpha="0"
+        android:importantForAccessibility="no" />
+
     <!-- Cinematic top shelf (cinematic_home): the focused dock app's artwork, a few pixels across and
          stretched over the screen, which softens it like a blur without the cost of one. Hidden otherwise. -->
     <ImageView
@@ -407,6 +423,132 @@
                 android:scrollbars="none"
                 android:descendantFocusability="afterDescendants" />
         </FrameLayout>
+    </LinearLayout>
+
+    <!-- Continue watching (ContinueWatching): the system's Watch Next list, under the top bar. Hidden when empty. -->
+    <LinearLayout
+        android:id="@+id/continueSection"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:visibility="gone">
+
+        <!-- "New Season" / "New Episode" / "New", from TMDB (TitleMetadata.badge); gone without one. -->
+        <TextView
+            android:id="@+id/continueBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="52dp"
+            android:layout_marginBottom="10dp"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:singleLine="true"
+            android:textColor="#FFFFFFFF"
+            android:textSize="13sp"
+            android:fontFamily="@string/font_medium"
+            android:visibility="gone" />
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="78dp"
+            android:layout_marginStart="52dp"
+            android:layout_marginEnd="52dp">
+            <ImageView
+                android:id="@+id/continueLogo"
+                android:layout_width="300dp"
+                android:layout_height="72dp"
+                android:layout_gravity="start|center_vertical"
+                android:scaleType="fitCenter"
+                android:visibility="gone" />
+            <TextView
+                android:id="@+id/continueTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="start|center_vertical"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:textColor="#FFFFFFFF"
+                android:textSize="30sp"
+                android:maxWidth="580dp"
+                android:includeFontPadding="false" />
+        </FrameLayout>
+
+        <!-- The source app's round icon, type and genres, then the age rating in a box, as in the Apple TV app. -->
+        <LinearLayout
+            android:id="@+id/continueMetaRow"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="52dp"
+            android:layout_marginEnd="52dp"
+            android:layout_marginTop="10dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <ImageView
+                android:id="@+id/continueAppIcon"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_marginEnd="10dp"
+                android:scaleType="centerCrop"
+                android:visibility="gone"
+                android:importantForAccessibility="no" />
+
+            <TextView
+                android:id="@+id/continueMetadata"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:singleLine="true"
+                android:ellipsize="end"
+                android:maxWidth="440dp"
+                android:textColor="#E6FFFFFF"
+                android:textSize="14sp"
+                android:fontFamily="@string/font_medium" />
+
+            <TextView
+                android:id="@+id/continueRating"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="10dp"
+                android:paddingStart="5dp"
+                android:paddingEnd="5dp"
+                android:paddingTop="1dp"
+                android:paddingBottom="1dp"
+                android:singleLine="true"
+                android:textColor="#E6FFFFFF"
+                android:textSize="11sp"
+                android:fontFamily="@string/font_medium"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/continueSubtitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="52dp"
+            android:layout_marginEnd="52dp"
+            android:layout_marginTop="8dp"
+            android:layout_marginBottom="0dp"
+            android:maxLines="2"
+            android:maxWidth="440dp"
+            android:ellipsize="end"
+            android:textColor="#D9FFFFFF"
+            android:textSize="13sp"
+            android:fontFamily="@string/font_regular" />
+
+        <!-- Resume button, progress and the page dots, built in code (ContinueWatching). -->
+        <LinearLayout
+            android:id="@+id/continueRow"
+            android:layout_marginTop="12dp"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="52dp"
+            android:orientation="vertical"
+            android:clipChildren="false"
+            android:clipToPadding="false" />
     </LinearLayout>
 
     <!-- The single floating glass highlight that springs between tiles. -->

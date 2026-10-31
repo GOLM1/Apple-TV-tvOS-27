@@ -19,6 +19,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
+import android.util.TypedValue;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -299,7 +300,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             }
             // The icon is only drawn (and sampled for the glow) when there is no banner, so a tile with a
             // banner skips loading and decoding it.
-            Drawable icon = banner == null ? ri.loadIcon(pm) : null;
+            Drawable icon = banner == null ? loadIcon(pm, ri) : null;
             if (card != null) {
                 fresh.add(new Entry(Entry.CARD, label, component, banner, icon, card.caption, card.accent));
             } else {
@@ -354,15 +355,37 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         if (id != 0) {
             try {
                 Resources resources = pm.getResourcesForApplication(ri.activityInfo.applicationInfo);
-                // Keep at least xhdpi detail rather than downsampling artwork before the focus zoom.
-                int density = Math.max(DisplayMetrics.DENSITY_XHIGH, ctx.getResources().getDisplayMetrics().densityDpi);
-                banner = resources.getDrawableForDensity(id, density, null);
+                banner = tileArtwork(resources, id);
             } catch (PackageManager.NameNotFoundException | Resources.NotFoundException ignored) {
             }
         }
         if (banner == null) banner = ri.activityInfo.loadBanner(pm);
         // A square "banner" counts as none: the tile shows the app's icon and name instead of a blur.
         return banner != null && isBannerShaped(banner.getIntrinsicWidth(), banner.getIntrinsicHeight()) ? banner : null;
+    }
+
+    private Drawable loadIcon(PackageManager pm, ResolveInfo ri) {
+        int id = ri.getIconResource();
+        if (id != 0) {
+            try {
+                String pkg = ri.resolvePackageName != null ? ri.resolvePackageName : ri.activityInfo.packageName;
+                return tileArtwork(pm.getResourcesForApplication(pkg), id);
+            } catch (PackageManager.NameNotFoundException | Resources.NotFoundException ignored) { }
+        }
+        return ri.loadIcon(pm);
+    }
+
+    /** Retain real xxhdpi detail for focus zoom, without enlarging a lower-resolution source at decode time. */
+    private Drawable tileArtwork(Resources resources, int id) {
+        int display = ctx.getResources().getDisplayMetrics().densityDpi;
+        TypedValue source = new TypedValue();
+        resources.getValueForDensity(id, Math.max(display, DisplayMetrics.DENSITY_XXHIGH), source, true);
+        return resources.getDrawableForDensity(id, artworkDensity(display, source.density), null);
+    }
+
+    static int artworkDensity(int display, int source) {
+        if (source <= 0 || source == TypedValue.DENSITY_NONE) return display;
+        return Math.max(display, Math.min(Math.max(display, DisplayMetrics.DENSITY_XXHIGH), source));
     }
 
     /**
@@ -451,16 +474,17 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         // The dock has no labels, unless always_show_names asks for them (DockDecoration then makes room in the band).
         // In a single row every tile is the dock's kind: the big title above names it.
         boolean dockKind = dockRow && (singleRow || position < dockSize);
+        h.centeredFocus = dockKind && LiquidGlass.enabled;
         h.name.setVisibility(dockKind && restNameAlpha == 0f ? View.INVISIBLE : View.VISIBLE);
         boolean focused = h.card.isFocused();   // a rebind after reload() can hit the focused tile
         h.name.setAlpha(focused ? 1f : restNameAlpha);
         h.focusMotion.cancel();
         h.card.setScaleX(focused && animations ? focusScale() : 1f);
         h.card.setScaleY(focused && animations ? focusScale() : 1f);
-        h.card.setTranslationY(focused && advancedEffects ? -2f * ctx.getResources().getDisplayMetrics().density : 0f);
+        h.card.setTranslationY(focused && advancedEffects && !h.centeredFocus ? -2f * ctx.getResources().getDisplayMetrics().density : 0f);
         h.card.setTranslationZ(focused && advancedEffects ? 16f * ctx.getResources().getDisplayMetrics().density : 0f);
-        h.banner.setScaleX(focused && advancedEffects ? 1.035f : 1f);
-        h.banner.setScaleY(focused && advancedEffects ? 1.035f : 1f);
+        h.banner.setScaleX(1f);
+        h.banner.setScaleY(1f);
         // A fully opaque banner covers the whole card (centerCrop), so the card's own fill under it is drawn for
         // nothing on every frame; keep it under banners with transparent parts and under icon tiles.
         h.card.setBackground(e.banner != null && e.banner.getOpacity() == PixelFormat.OPAQUE ? null : h.cardBackground);
@@ -511,6 +535,11 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         // TV apps launch with the same leanback intent as from the stock launcher or the remote, so an app
         // already running resumes instead of restarting; only phone apps added from the library use plain MAIN.
         if (leanbackPackages.contains(e.pkg)) i.addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
+        if ("com.stremio.one".equals(e.pkg)) {
+            // Stremio's standard MainActivity can have a VIEW intent at the task root. MAIN would
+            // otherwise add a second MainActivity above its playing screen instead of resuming it.
+            i.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        }
         String action = launchActions.get(e.pkg);
         if (action != null) {
             // NEW_TASK only: with RESET_TASK_IF_NEEDED, Android just brings a running task of the app to the front
@@ -853,6 +882,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     static final class Holder extends RecyclerView.ViewHolder {
         final View card;
         final Motion.Focus focusMotion;
+        boolean centeredFocus;
         /** item_app.xml's tile_bg: the dark card behind an icon tile, or behind a banner that has transparent parts. */
         final Drawable cardBackground;
         final ImageView banner;
@@ -902,7 +932,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
 
             card.setOnFocusChangeListener((view, focused) -> {
                 // glass_style tvos: the focused tile's own sheen (MainActivity.catchLight) goes when focus leaves it.
-                if (!focused && view.getForeground() instanceof TileSheen) view.setForeground(null);
+                if (!focused && view.getForeground() instanceof TileSheen) {
+                    ((TileSheen) view.getForeground()).stop();
+                    view.setForeground(null);
+                }
                 view.animate().cancel();
                 banner.animate().cancel();
                 name.animate().cancel();
@@ -921,7 +954,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                     // A short zoom with no hardware layer: building a layer for so short an animation costs more
                     // frames than it saves. The name just appears instead of fading.
                     view.animate().scaleX(s).scaleY(s)
-                            .translationY(focused && advancedEffects ? -2f * density : 0f)
+                            .translationY(focused && advancedEffects && !centeredFocus ? -2f * density : 0f)
                             .translationZ(focused && advancedEffects ? 16f * density : 0f)
                             .setDuration(focused ? Motion.REDUCED_MS : 60)
                             .setInterpolator(new DecelerateInterpolator())
@@ -932,12 +965,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                     // Only on focus: snapping it back to -6dp while it fades out would jump it up over the tile.
                     if (focused) name.setTranslationY(density * 4f);
                 } else {
-                    focusMotion.to(s, focused && advancedEffects ? -2f * density : 0f,
+                    focusMotion.to(s, focused && advancedEffects && !centeredFocus ? -2f * density : 0f,
                             focused && advancedEffects ? 16f * density : 0f);
-                    if (advancedEffects) {
-                        banner.animate().scaleX(focused ? 1.035f : 1f).scaleY(focused ? 1.035f : 1f)
-                                .setDuration(280).start();
-                    }
                     name.animate().alpha(focused ? 1f : restNameAlpha)
                             .translationY(focused ? density * 4f : -density * 6f)
                             .setDuration(220).start();
